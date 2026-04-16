@@ -35,7 +35,7 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "ANN"]
-ignore = []
+ignore = ["UP046"]  # CONVENTION: keep Generic[S, E] — PEP 695 syntax breaks icontract lambda introspection
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
