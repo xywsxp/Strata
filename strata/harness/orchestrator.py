@@ -33,8 +33,12 @@ from strata.core.errors import (
 )
 from strata.core.types import ActionResult, GlobalState, TaskGraph, TaskNode, TaskState
 from strata.env.protocols import EnvironmentBundle
+from strata.grounding.terminal_handler import TerminalHandler
+from strata.grounding.validator import ActionValidator
+from strata.grounding.vision_locator import VisionLocator
 from strata.harness.actions import ACTION_VOCABULARY
 from strata.harness.executor import PrimitiveTaskExecutor
+from strata.harness.gui_lock import GUILock
 from strata.harness.recovery import RecoveryAction, RecoveryLevel, RecoveryPipeline
 from strata.harness.scheduler import LinearRunner, TaskExecutor
 from strata.harness.state_machine import (
@@ -100,9 +104,22 @@ class AgentOrchestrator:
         # CONVENTION: llm_router 可选注入 —— 生产路径由 __main__ 构造一次；
         # 测试可传 mock 免去 OpenAI 客户端构造的网络依赖。
         self._llm_router = llm_router if llm_router is not None else LLMRouter(config)
-        self._executor: TaskExecutor = (
-            executor if executor is not None else PrimitiveTaskExecutor(bundle=bundle)
-        )
+        # CONVENTION: 生产路径下所有 grounding 组件由 Orchestrator 构造并注入
+        # PrimitiveTaskExecutor；测试可直接传 executor 绕过构造链。
+        if executor is None:
+            self._gui_lock = GUILock(config.gui)
+            self._action_validator = ActionValidator(bundle.gui)
+            self._vision_locator = VisionLocator(bundle.gui, self._llm_router, config.gui)
+            self._terminal_handler = TerminalHandler(bundle.terminal, config.terminal)
+            self._executor: TaskExecutor = PrimitiveTaskExecutor(
+                bundle=bundle,
+                vision_locator=self._vision_locator,
+                terminal_handler=self._terminal_handler,
+                gui_lock=self._gui_lock,
+                action_validator=self._action_validator,
+            )
+        else:
+            self._executor = executor
         self._runner = LinearRunner(config)
         self._recovery = RecoveryPipeline(config, self._adjuster)
         self._state_machine: StateMachine[GlobalState, GlobalEvent]

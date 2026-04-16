@@ -415,6 +415,44 @@ def test_run_goal_always_terminates(
 # ── UI wiring ──
 
 
+# ── Phase D: grounding components constructed and injected ──
+
+
+class TestGroundingWiring:
+    def test_default_executor_has_grounding_components(self) -> None:
+        """Constructing without an executor injects VisionLocator,
+        TerminalHandler, GUILock, ActionValidator into PrimitiveTaskExecutor."""
+        from strata.grounding.terminal_handler import TerminalHandler
+        from strata.grounding.validator import ActionValidator
+        from strata.grounding.vision_locator import VisionLocator
+        from strata.harness.executor import PrimitiveTaskExecutor
+        from strata.harness.gui_lock import GUILock
+
+        orch = _make_orchestrator()
+
+        assert isinstance(orch._executor, PrimitiveTaskExecutor)
+        assert isinstance(orch._vision_locator, VisionLocator)
+        assert isinstance(orch._terminal_handler, TerminalHandler)
+        assert isinstance(orch._gui_lock, GUILock)
+        assert isinstance(orch._action_validator, ActionValidator)
+
+
+class TestVisionLocatorCacheRemoved:
+    def test_next_page_cache_attribute_does_not_exist(self) -> None:
+        """Phase D.4: dead _next_page_cache field removed."""
+        from strata.grounding.vision_locator import VisionLocator
+
+        orch = _make_orchestrator()
+        assert not hasattr(orch._vision_locator, "_next_page_cache")
+        # Sanity: constructor arguments unchanged.
+        assert VisionLocator.__init__.__code__.co_varnames[:4] == (
+            "self",
+            "gui",
+            "router",
+            "config",
+        )
+
+
 class TestUIInteractions:
     def test_display_plan_called(self, monkeypatch: pytest.MonkeyPatch) -> None:
         graph = _single_task_graph()

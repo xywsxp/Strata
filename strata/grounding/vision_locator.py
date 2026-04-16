@@ -39,8 +39,12 @@ class VisionLocator:
         self._gui = gui
         self._router = router
         self._config = config
-        self._screen_w, self._screen_h = gui.get_screen_size()
-        self._next_page_cache: Coordinate | None = None
+
+    def _screen_bounds(self) -> tuple[int, int]:
+        """Return (w, h) via a live adapter call — screen size may change at
+        runtime (DPI change, external display plugged in, OSWorld VM resize).
+        """
+        return self._gui.get_screen_size()
 
     @icontract.require(
         lambda description: len(description.strip()) > 0,
@@ -54,8 +58,10 @@ class VisionLocator:
         ),
     )
     @icontract.ensure(
-        lambda self, result: 0 <= result.x < self._screen_w and 0 <= result.y < self._screen_h,
-        "returned coordinate must be within screen bounds",
+        lambda self, result: (
+            0 <= result.x < self._screen_bounds()[0] and 0 <= result.y < self._screen_bounds()[1]
+        ),
+        "returned coordinate must be within live screen bounds",
     )
     def locate(self, description: str, role: str | None = None) -> Coordinate:
         """Single-shot locate: screenshot -> VLM -> coordinate."""
@@ -79,8 +85,10 @@ class VisionLocator:
         ),
     )
     @icontract.ensure(
-        lambda self, result: 0 <= result.x < self._screen_w and 0 <= result.y < self._screen_h,
-        "returned coordinate must be within screen bounds",
+        lambda self, result: (
+            0 <= result.x < self._screen_bounds()[0] and 0 <= result.y < self._screen_bounds()[1]
+        ),
+        "returned coordinate must be within live screen bounds",
     )
     def locate_with_scroll(
         self,
@@ -111,7 +119,6 @@ class VisionLocator:
                 continue
 
             if response.action_type == "next_page" and response.coordinate is not None:
-                self._next_page_cache = response.coordinate
                 self._gui.click(response.coordinate.x, response.coordinate.y)
                 time.sleep(self._config.wait_interval)
                 scroll_count += 1
@@ -152,7 +159,13 @@ class VisionLocator:
         return self._parse_vlm_response(response.content)
 
     def _parse_vlm_response(self, raw: str) -> VisionResponse:
-        """Parse JSON response from VLM into VisionResponse."""
+        """Parse JSON response from VLM into VisionResponse.
+
+        Any ``ValueError`` / ``TypeError`` from coercion (e.g. ``float(data["x"])``
+        when the VLM hallucinates ``"x": "left"``) is wrapped as
+        :class:`VisionLocatorError` — stdlib exceptions must never leak across
+        this trust boundary.
+        """
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -165,12 +178,30 @@ class VisionLocator:
         if action_type not in ("click", "scroll", "next_page", "not_found"):
             raise VisionLocatorError(f"invalid action_type: {action_type!r}")
 
-        coordinate: Coordinate | None = None
-        if "x" in data and "y" in data:
-            coordinate = Coordinate(x=float(data["x"]), y=float(data["y"]))
+        try:
+            coordinate: Coordinate | None = None
+            if "x" in data and "y" in data:
+                coordinate = Coordinate(x=float(data["x"]), y=float(data["y"]))
+            confidence = float(data.get("confidence", 0.0))
+        except (ValueError, TypeError) as exc:
+            raise VisionLocatorError(
+                f"VLM returned non-numeric coordinate/confidence: {exc}"
+            ) from exc
 
         scroll_direction = data.get("direction")
-        confidence = float(data.get("confidence", 0.0))
+        if action_type == "scroll":
+            if scroll_direction not in ("up", "down", "left", "right"):
+                raise VisionLocatorError(
+                    f"invalid scroll direction: {scroll_direction!r}; "
+                    "expected one of up/down/left/right"
+                )
+        elif scroll_direction is not None and scroll_direction not in (
+            "up",
+            "down",
+            "left",
+            "right",
+        ):
+            raise VisionLocatorError(f"invalid scroll direction: {scroll_direction!r}")
 
         return VisionResponse(
             action_type=action_type,
@@ -181,16 +212,26 @@ class VisionLocator:
         )
 
     def _execute_scroll_action(self, response: VisionResponse) -> None:
-        """Execute a scroll action based on VisionResponse direction."""
+        """Execute a scroll action based on VisionResponse direction.
+
+        Direction is pre-validated by :meth:`_parse_vlm_response`; callers
+        into this helper assume ``response.scroll_direction`` is one of
+        ``up/down/left/right``. If it is missing (defensive guard), raise
+        :class:`VisionLocatorError` rather than silently scrolling (0, 0).
+        """
         step = self._config.scroll_step_pixels
-        direction = response.scroll_direction or "down"
-        dx, dy = 0, 0
+        direction = response.scroll_direction
         if direction == "down":
-            dy = step
+            dx, dy = 0, step
         elif direction == "up":
-            dy = -step
+            dx, dy = 0, -step
         elif direction == "right":
-            dx = step
+            dx, dy = step, 0
         elif direction == "left":
-            dx = -step
+            dx, dy = -step, 0
+        else:
+            raise VisionLocatorError(
+                f"_execute_scroll_action: missing/invalid direction "
+                f"{direction!r} (should have been rejected by _parse_vlm_response)"
+            )
         self._gui.scroll(dx, dy)
