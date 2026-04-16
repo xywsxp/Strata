@@ -2,43 +2,99 @@
 
 Handles: goal input, plan display, confirmation, progress reporting,
 error decisions, and SIGINT for graceful shutdown.
+
+# CONVENTION: high 档 auto_confirm 下 handle_error 默认返回 skip 决策
+# — 可由 StrataConfig.max_loop_iterations 等后续配置覆盖；当前固定 skip。
 """
 
 from __future__ import annotations
 
+import contextlib
 import signal
-from typing import Literal
+import types
+from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING, Literal
 
 import icontract
 
 from strata.core.config import StrataConfig
 from strata.core.types import TaskGraph, TaskState
+from strata.env.protocols import EnvironmentBundle
+
+if TYPE_CHECKING:
+    from strata.harness.orchestrator import AgentOrchestrator
+
+AutoConfirmLevel = Literal["none", "low", "medium", "high"]
+
+SigintHandler = Callable[[int, types.FrameType | None], None]
+
+
+@contextlib.contextmanager
+def _sigint_scope(handler: SigintHandler) -> Iterator[None]:
+    """Install a SIGINT handler for the duration of the with-block, then
+    restore the previous handler on exit. Replaces the previous global
+    :func:`signal.signal` side-effect at CLI construction.
+    """
+    previous = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 class CLI:
     """Interactive CLI for the Strata agent."""
 
-    def __init__(self, config: StrataConfig) -> None:
+    def __init__(
+        self,
+        config: StrataConfig,
+        bundle: EnvironmentBundle | None = None,
+    ) -> None:
+        # CONVENTION: bundle 形参历史遗留 — 由 Orchestrator 持有；此处保留供测试
+        # 传 None 兼容旧构造路径，不在生产中被使用。
         self._config = config
+        self._bundle = bundle
         self._interrupted = False
-        signal.signal(signal.SIGINT, self._handle_sigint)
+        self._first_plan = True
 
     @property
     def interrupted(self) -> bool:
         return self._interrupted
 
-    def run(self) -> None:
-        """Main REPL loop: read goal → plan → confirm → execute → repeat."""
-        self._print("[Strata] Ready. Type a goal or 'quit' to exit.")
-        while not self._interrupted:
-            try:
-                goal = input("\n[Goal] > ").strip()
-            except EOFError:
-                break
-            if not goal or goal.lower() in ("quit", "exit", "q"):
-                break
-            self._print(f"[Strata] Received goal: {goal}")
-            self._print("[Strata] Planning... (would call decompose_goal here)")
+    @property
+    def auto_confirm_level(self) -> AutoConfirmLevel:
+        return self._config.auto_confirm_level
+
+    @icontract.require(
+        lambda orchestrator: orchestrator is not None,
+        "orchestrator must be provided",
+    )
+    def run(self, orchestrator: AgentOrchestrator) -> None:
+        """Main REPL loop: read goal → hand off to orchestrator → repeat.
+
+        SIGINT is captured via :func:`_sigint_scope` so the handler is only
+        installed for the duration of the loop. The orchestrator drives the
+        full plan/confirm/execute/recover lifecycle; this method is purely the
+        ``input()`` ↔ Orchestrator adapter.
+        """
+        with _sigint_scope(self._handle_sigint):
+            self._print("[Strata] Ready. Type a goal or 'quit' to exit.")
+            while not self._interrupted:
+                try:
+                    goal = input("\n[Goal] > ").strip()
+                except EOFError:
+                    break
+                if not goal or goal.lower() in ("quit", "exit", "q"):
+                    break
+                self._print(f"[Strata] Received goal: {goal}")
+                result = orchestrator.run_goal(goal)
+                if result.final_state == "COMPLETED":
+                    self._print(f"[Strata] Goal completed: {goal}")
+                else:
+                    err = result.error
+                    err_msg = f"{type(err).__name__}: {err}" if err is not None else "unknown error"
+                    self._print(f"[Strata] Goal failed: {err_msg}")
 
     def display_plan(self, graph: TaskGraph) -> None:
         """Print the task graph to stdout."""
@@ -56,9 +112,37 @@ class CLI:
 
     @icontract.ensure(lambda result: isinstance(result, bool), "must return bool")
     def confirm_plan(self) -> bool:
-        """Ask user to confirm the plan. Returns True for yes, False for no."""
+        """Ask user to confirm the plan, gated by ``auto_confirm_level``:
+
+        * ``none``  — always ask.
+        * ``low``   — ask only the first time; subsequent plans auto-confirm.
+        * ``medium``— auto-confirm (yes).
+        * ``high``  — auto-confirm (yes).
+        """
+        level = self.auto_confirm_level
+        if level in ("medium", "high"):
+            return True
+        if level == "low" and not self._first_plan:
+            return True
+        self._first_plan = False
         try:
             answer = input("[Confirm] Execute this plan? (y/n) > ").strip().lower()
+        except EOFError:
+            return False
+        return answer in ("y", "yes")
+
+    def handle_destructive(self, description: str) -> bool:
+        """Ask the user to allow a destructive action.
+
+        * ``none`` / ``low`` / ``medium`` — warn and ask (force confirmation).
+        * ``high`` — warn and auto-allow.
+        """
+        self._print(f"[Warning] Destructive action: {description}")
+        if self.auto_confirm_level == "high":
+            self._print("[Warning] auto_confirm_level=high -> auto-allowed")
+            return True
+        try:
+            answer = input("[Confirm] Allow? (y/n) > ").strip().lower()
         except EOFError:
             return False
         return answer in ("y", "yes")
@@ -76,7 +160,22 @@ class CLI:
         self._print(f"  [{icon}] {task_id}: {state}")
 
     def handle_error(self, task_id: str, error: Exception) -> Literal["retry", "skip", "abort"]:
-        """Ask user how to handle a task error."""
+        """Ask the user how to handle a task error, gated by level:
+
+        * ``none`` / ``low`` — ask.
+        * ``medium`` — return ``retry`` once; on a subsequent call for the
+          same task, caller is expected to surface another error and we ask.
+          (Current implementation: return ``retry`` on first call, then ask.)
+        * ``high`` — return ``skip`` by default.
+        """
+        level = self.auto_confirm_level
+        if level == "high":
+            self._print(f"[Error] Task {task_id} failed: {error} — auto_confirm=high, skipping")
+            return "skip"
+        if level == "medium" and not getattr(self, "_retried_" + task_id, False):
+            setattr(self, "_retried_" + task_id, True)
+            self._print(f"[Error] Task {task_id} failed: {error} — auto-retrying once")
+            return "retry"
         self._print(f"\n[Error] Task {task_id} failed: {error}")
         try:
             choice = input("[Action] (r)etry / (s)kip / (a)bort > ").strip().lower()
@@ -88,7 +187,7 @@ class CLI:
             return "skip"
         return "abort"
 
-    def _handle_sigint(self, signum: int, frame: object) -> None:
+    def _handle_sigint(self, signum: int, frame: types.FrameType | None) -> None:
         self._interrupted = True
         self._print("\n[Strata] Interrupt received. Finishing current task...")
 
