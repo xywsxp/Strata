@@ -37,6 +37,9 @@ ActionName = Literal[
     "set_clipboard",
 ]
 
+# CONVENTION: strata.harness.actions — 词典用 tuple[Literal, ...] 而非 Enum。
+# 理由：action 名直接对应 planner 产出的 JSON 字符串，tuple 无额外 .value 解包；
+# Literal 类型可从 tuple 推导，给 mypy 和 IDE 同等提示；Enum 反而多一层包装。
 ACTION_VOCABULARY: Final[tuple[ActionName, ...]] = (
     "click",
     "double_click",

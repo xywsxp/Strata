@@ -11,6 +11,9 @@ from strata.core.errors import GUILockTimeoutError
 from strata.core.types import ActionResult
 
 
+# CONVENTION: strata.harness.gui_lock — 所有 GUI 调用必须经过 GUILock，即使当前
+# AgentOrchestrator 单线程运行也不例外。理由：为未来多 executor 并行留口；单个
+# `with` 块的常量开销可忽略；一致的包裹让"哪些动作触碰 GUI"在代码层面显式可见。
 class GUILock:
     """Reentrant GUI mutex with configurable timeout."""
 

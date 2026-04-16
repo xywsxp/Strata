@@ -59,6 +59,10 @@ _GUI_ACTIONS: Final[frozenset[str]] = frozenset(
 _COORDINATE_ACTIONS: Final[frozenset[str]] = frozenset({"click", "double_click", "move_mouse"})
 
 
+# CONVENTION: strata.harness.executor — action 分派故意用 match/if-elif 静态结构
+# 而非 {name: handler} 注册表；match 可被 mypy 穷举检查（Literal[ActionName]），
+# 注册表则需 cast(Callable, ...) 损失类型精度。权衡：每新增动作要改两处（vocab
+# + 分派），换来 100% 静态类型覆盖。
 class PrimitiveTaskExecutor:
     """Structural implementation of :class:`strata.harness.scheduler.TaskExecutor`.
 

@@ -59,6 +59,9 @@ from strata.planner.adjuster import Adjustment, adjust_plan, apply_adjustment
 from strata.planner.htn import decompose_goal
 
 
+# CONVENTION: strata.harness.orchestrator — AgentUI Protocol 定义在 harness 而非
+# interaction 层，避免 harness → interaction 的反向依赖；UI 是控制流的一部分，
+# 其形状由 orchestrator 决定，由前端（CLI / 未来的 TUI）结构化实现。
 @runtime_checkable
 class AgentUI(Protocol):
     """Narrow UI port the Orchestrator invokes for human interaction.
@@ -94,6 +97,10 @@ class ExecutionResult:
     graph: TaskGraph | None = None
 
 
+# CONVENTION: strata.harness.orchestrator — Orchestrator 显式持有整个策略栈
+# (planner/runner/recovery/persistence/context/audit/grounding)，故意不引入 DI
+# 容器：组件数量 <15，显式构造比框架层反射更可读、对 mypy 更友好。若未来超过
+# 20 个组件再考虑工厂模式。
 class AgentOrchestrator:
     """Owns the full strategy stack and drives the goal lifecycle."""
 
@@ -507,6 +514,10 @@ class AgentOrchestrator:
 
     # ── persistence / resume ──
 
+    # CONVENTION: strata.harness.orchestrator — checkpoint 在"任务边界"写入，而非
+    # "动作边界"。理由：任务粒度足以支持崩溃恢复（重新执行一整个任务比丢掉整条
+    # 目标代价小得多），动作粒度写入会放大磁盘 I/O 至每秒数次。写入使用
+    # PersistenceManager.atomic_write，天然防止半写损坏。
     def _save_checkpoint(self) -> None:
         """Persist current lifecycle snapshot. Never raises — persistence
         failures (disk full, permissions) are not fatal for the run."""
