@@ -12,7 +12,7 @@ import tempfile
 import hypothesis.strategies as st
 from hypothesis.strategies import SearchStrategy
 
-from strata.core.types import CommandResult, TaskGraph, TaskNode
+from strata.core.types import CommandResult, Coordinate, TaskGraph, TaskNode
 
 _ALPHA_NUM = st.characters(categories=["L", "N"])
 _ALPHA = st.characters(categories=["L"])
@@ -130,6 +130,21 @@ def st_sandbox_path(
         )
         path = os.path.join(*segments)
         return (sandbox_root, path, False)
+
+
+# ── Coordinate strategy ──
+
+
+@st.composite
+def st_coordinate(
+    draw: st.DrawFn,
+    max_x: float = 1920.0,
+    max_y: float = 1080.0,
+) -> Coordinate:
+    """Generate a Coordinate within screen bounds."""
+    x = draw(st.floats(min_value=0.0, max_value=max_x, allow_nan=False))
+    y = draw(st.floats(min_value=0.0, max_value=max_y, allow_nan=False))
+    return Coordinate(x=x, y=y)
 
 
 # ── CommandResult strategy ──
