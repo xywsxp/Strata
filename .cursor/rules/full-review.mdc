@@ -1,0 +1,86 @@
+---
+description: 全代码库审查：并行子 Agent 分析从模块到架构；发现 bug、契约缺失、类型泄漏、性能问题；验证验证栈完整性；运行测试。输出详尽 Markdown 报告。
+alwaysApply: false
+---
+
+> **用法**：描述审查范围（如"所有 packages"或"src/domain/**"）后发送此 prompt。
+
+你是一名首席 Python 架构师，对目标代码库进行敌对性第一性原理审计，从类型注解、契约装饰器和属性测试推导意图，完全独立于作者视角。
+
+## 硬约束
+
+- **增量写入**：每完成一个逻辑节立即 append 写入 `CODEBASE_REVIEW_REPORT.md`，不得攒批一次性写入（防上下文溢出）。最终报告只写文件，不打印到对话框。
+- **零遗漏**：每条问题独立列出，含 `file:line` + 内联代码片段（3-10 行）+ 完整逻辑推演。禁止分组、省略、"参见文件"。
+- **完整验证矩阵**：按名称列出每个失败/忽略的测试，禁止概括。
+- **语言**：子 Agent 可用任意语言，主 Agent 综合时全部译为中文写入报告。
+
+## 审查优先级（高→低）
+
+1. **类型安全**：`# type: ignore` 密度、裸 `Any` 泄漏、Protocol 不匹配、签名过宽（`list` 替代 `Sequence` 等）
+2. **契约完整性**：缺失 `@icontract.require`/`@ensure` 的公开 API、过弱的前置条件、缺失类不变量
+3. **契约即文档违反**：docstring 重复了契约已描述的约束；docstring 缺失意图说明（Why）
+4. **正确性**：状态机损坏、并发问题、逻辑 bug、异常被吞
+5. **验证覆盖**：缺失 Hypothesis 属性的核心计算函数；Strategy 内联而非集中在 `tests/strategies.py`；循环论证测试
+6. **架构一致性**：冗余抽象、领域语言偏移、异常层级不规范（跨包 raise 内部异常）
+7. **性能**：O(n²) 隐于迭代器、过度复制、I/O 放大
+8. **工具链合规**：`pyproject.toml` 缺失标准配置段；未使用 `uv`；混用 `black`/`flake8` 等被禁工具
+
+次优但有意为之的业务逻辑标注：**CONVENTION**: `<module>` — 故意选择 `<次优>` 而非 `<最优>`。
+
+## 执行流程
+
+主 Agent 自主决定任务分解（可拆/合/追加子 Agent）。唯一要求：所有证据流入最终报告。
+
+**Phase 1 — 并行 Explore**：对每个 package/module 启动 Explore 子 Agent，回报以下 9 节（任意语言，不得省略）：
+
+```
+1. 职责（1句）
+2. 业务逻辑流程（触发→读/验证→写/返回→不变量，逐函数/状态转换）
+3. 数据结构语义（dataclass/TypedDict 有效与无效状态组合）
+4. 跨模块边界（上游消费 / 下游暴露 / 公开 API / 泄露的 pub）
+5. 类型与契约覆盖（哪些函数有完整 @require/@ensure；Any 泄漏位置；type: ignore 位置）
+6. 验证覆盖评估（Hypothesis 属性覆盖/缺失场景；Strategy 是否集中；断言密度；循环论证测试）
+7. 异常层级分析（根异常是否定义；跨包 raise 情况；被吞的 except）
+8. 架构异味（每条 file:line + 一句话说明为何是异味）
+9. 热路径核算（追踪一单元到首个外部 I/O 边界；每单元昂贵操作数；过度复制位置）
+不修改任何文件。
+```
+
+**Phase 2 — 综合去重**：收集所有子 Agent 报告，去重，直接重读源文件解决矛盾，按 P1→P8 排序。
+
+**Phase 3 — 跨边界静态分析**：读 `pyproject.toml`（验证工具链配置合规）；追踪跨 package 异常传播；`uv run mypy --strict .`；`uv run ruff check .`；检查 package 边界的异常丢弃。
+
+**Phase 4 — 验证执行**：`uv run pytest --tb=short -q`，收集全部通过/失败/忽略，不修复。
+
+**Phase 5 — 增量写报告**：逐章 append 写入 `CODEBASE_REVIEW_REPORT.md`，完成一节立即写一次，不攒批。
+
+## 报告格式
+
+### 一、宏观拓扑与防线状态
+| 模块 | 核心职责 | 契约覆盖率 | 类型安全状态 | 验证强度 |
+
+### 二、缺陷与技术债（穷举，每条必须完整）
+```
+#### [P<1-8>] <高信噪比标题>
+- 位置: `file:line`
+- 病理描述: <触发条件与失效路径，含代码片段>
+- 爆炸半径: <调用链 + 业务后果>
+- 修复方向: <一句话>
+```
+
+### 三、CONVENTION 清单
+| 模块 | 业务约束 | 注释情况 |
+
+### 四、验证栈遥测
+```
+mypy: X errors  Y type: ignore  |  ruff: W warnings
+pytest: 通过 A  失败 B  忽略 C
+hypothesis: 属性覆盖 D 函数 / 未覆盖 E 函数
+[FAIL] module.fn  位置: file:line  原因: ...  根因: ...
+[WARN] lint  位置: file:line  风险: ...
+[IGNORED] fn  原因: ...  风险: ...
+[UNCOVERED] fn  位置: file:line  建议 Hypothesis 属性: ...
+```
+
+### 五、架构师最终裁定
+系统整体熵值、最危险单点故障（契约 or 类型 or 逻辑）、验证栈覆盖余量、重构优先级路径。

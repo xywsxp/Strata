@@ -1,0 +1,43 @@
+"""Core infrastructure: shared types, errors, config, sandbox."""
+
+from strata.core.types import (
+    ActionResult,
+    AppInfo,
+    CommandResult,
+    Coordinate,
+    FileInfo,
+    GlobalState,
+    LLMRole,
+    ScreenRegion,
+    TaskGraph,
+    TaskNode,
+    TaskState,
+    VisionActionType,
+    VisionResponse,
+    WindowInfo,
+    task_graph_from_dict,
+    task_graph_to_dict,
+    task_node_from_dict,
+    task_node_to_dict,
+)
+
+__all__ = [
+    "ActionResult",
+    "AppInfo",
+    "CommandResult",
+    "Coordinate",
+    "FileInfo",
+    "GlobalState",
+    "LLMRole",
+    "ScreenRegion",
+    "TaskGraph",
+    "TaskNode",
+    "TaskState",
+    "VisionActionType",
+    "VisionResponse",
+    "WindowInfo",
+    "task_graph_from_dict",
+    "task_graph_to_dict",
+    "task_node_from_dict",
+    "task_node_to_dict",
+]

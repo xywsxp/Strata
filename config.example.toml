@@ -1,0 +1,62 @@
+# Strata Agent — example configuration
+# Copy to ~/.strata/config.toml and fill in real API keys.
+
+log_level = "INFO"
+audit_log = "~/.strata/audit.jsonl"
+trash_dir = "~/.strata/trash"
+max_loop_iterations = 50
+auto_confirm_level = "low"
+dangerous_patterns = ["rm -rf", "mkfs", "dd if=", "> /dev/", "chmod 777"]
+
+[providers.deepseek]
+api_key = "sk-REPLACE-ME"
+base_url = "https://api.deepseek.com/v1"
+model = "deepseek-chat"
+
+[providers.grok]
+api_key = "xai-REPLACE-ME"
+base_url = "https://api.x.ai/v1"
+model = "grok-3-mini"
+
+[providers.kimi]
+api_key = "sk-REPLACE-ME"
+base_url = "https://api.moonshot.cn/v1"
+model = "kimi-latest"
+
+[roles]
+planner = "deepseek"
+grounding = "deepseek"
+vision = "kimi"
+search = "grok"
+
+[sandbox]
+enabled = true
+root = "~/strata-sandbox"
+read_only_paths = ["/etc/os-release", "/usr/share"]
+ask_for_permission = true
+
+[gui]
+lock_timeout = 10.0
+wait_interval = 0.5
+screenshot_without_lock = false
+enable_scroll_search = true
+max_scroll_attempts = 10
+scroll_step_pixels = 300
+
+[terminal]
+command_timeout = 300.0
+silence_timeout = 30.0
+default_shell = "/bin/bash"
+
+[memory]
+sliding_window_size = 5
+max_facts_in_slot = 20
+
+[osworld]
+enabled = false
+provider = "docker"
+os_type = "Ubuntu"
+screen_size = [1920, 1080]
+headless = true
+action_space = "computer_13"
+# docker_image = "custom-osworld:latest"  # uncomment to override default

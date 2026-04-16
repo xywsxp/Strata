@@ -1,0 +1,104 @@
+---
+description: Workspace-level engineering standards — FV-First methodology, adversarial agent design, gate checks, and Python coding philosophy. Always applied.
+alwaysApply: true
+---
+
+# Workspace Instructions
+
+## FV-First 方法论
+
+所有代码变更严格在 **SPECIFY → IMPLEMENT → VERIFY** 状态机内运行：
+
+1. **Scratchpad 规格推演**：动手前输出类型签名 + 契约 + Hypothesis 属性 + 算法伪代码，顺序不可颠倒。
+2. **契约先行**：先写 `@icontract.require` / `@icontract.ensure` / `@icontract.invariant` 和类型签名，再写实现——可执行规格优先于一切。
+3. **最小化实现**：写出满足契约与属性的最小阻力代码。
+4. **分层验证**：按 L0→L4 逐层通过，不得跳层。
+
+### 验证层级（L0 优先，成本递增）
+
+| 层级 | 工具 | 捕获的错误类 |
+|------|------|-------------|
+| L0 | `mypy --strict` | 类型不一致、nullability、Protocol 不匹配 |
+| L1 | `icontract` 契约 | L0 无法表达的业务约束（范围、不变量、后置条件） |
+| L2 | `hypothesis` 属性 | 通用命题（往返一致性、幂等性、单调性、结合律） |
+| L3 | `pytest` 回归示例 | 具体场景锚点，补充 L2 |
+| L4 | `ruff check` + `ruff format` | 风格、常见陷阱、格式一致性 |
+
+## Adversarial Agent Design
+
+每个实现步骤物理隔离为两个 Agent——**Write Agent**（规格推演 + 实现）和 **Review Agent**（只读黑盒，必须读全局上下文防止盲人摸象）。Write-Review 循环上限 **3 次**，超限熔断交人类接管。
+
+## Gate Check
+
+- **Step 后**：`mypy --strict <module> && pytest tests/<module> -x -q`
+- **Phase 后**：`mypy --strict . && pytest --tb=short -q && ruff check . && ruff format --check .`
+
+## 工具链标准
+
+**包管理**：统一使用 `uv`。
+- 初始化：`uv init`；添加依赖：`uv add <pkg>`；添加开发依赖：`uv add --dev <pkg>`
+- 运行命令：`uv run <cmd>`（如 `uv run pytest`、`uv run mypy`）
+- 禁止直接使用 `pip install`；禁止手动维护 `requirements.txt`（由 `uv` 管理 `pyproject.toml`）
+
+**Lint / Format**：统一使用 `ruff`，禁止引入 `flake8`、`black`、`isort`、`pylint`。
+
+**标准 pyproject.toml 配置段**（新项目必须包含）：
+
+```toml
+[tool.mypy]
+strict = true
+python_version = "3.12"
+warn_return_any = true
+disallow_any_generics = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ANN"]
+ignore = ["ANN101", "ANN102"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --tb=short"
+
+[tool.hypothesis]
+suppress_health_check = ["too_slow"]
+deriving_settings_from = "default"
+```
+
+## Python 编码约束
+
+**Type Everything**：
+- 所有函数（含内部函数）必须完整类型注解。
+- 禁止裸 `Any`；如必须使用须加 `# CONVENTION:` 注释说明原因。
+- 优先用 `Protocol` 定义接口而非继承具体类。
+- 容器类型优先 `Sequence` / `Mapping` / `AbstractSet` over `list` / `dict` / `set`（入参）。
+
+**Immutability First**：
+- 值对象使用 `@dataclass(frozen=True)`；不可变字段用 `Final`。
+- 函数内不修改传入的可变容器，返回新对象。
+
+**契约即文档**：
+- 公开函数的约束通过 `@icontract.require` / `@icontract.ensure` 表达，而非纯文字 docstring。
+- docstring 只写**意图**（Why），不重复契约（What/How）——契约已经可执行且自描述。
+- 禁止写 "参数 x 必须大于 0" 这类在契约里已有的 docstring 句子。
+
+**Fail Fast**：
+- 前置条件违反 → `@icontract.require`（自动抛出 `ViolationError`，不吞掉）。
+- 不变量违反 → `assert` + 描述（`assert condition, "invariant: <why>"`）。
+- 可恢复错误 → 自定义异常层级（见下），不得裸 `raise Exception`。
+- 禁止 bare `except:`；禁止 `except Exception: pass`。
+
+**异常层级**：
+- 每个顶层 package 定义 `<PackageName>Error(Exception)` 根异常。
+- 子模块从根异常派生专用子类。
+- 禁止跨 package 边界抛出对方的内部异常。
+
+**No Dead Code**：禁止残留死代码；预留 API 须加 `# CONVENTION: <约定> — 预留，原因 <why>` 注释。
+
+**Flat Abstraction**：如无必要勿增实体，禁止过度封装无复用价值的本地 Helper。
+
+**现实主义妥协**：次优选择必须备案：
+`# CONVENTION: <约定> — 故意选择 <次优> 而非 <最优>`

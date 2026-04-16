@@ -1,0 +1,49 @@
+[project]
+name = "strata"
+version = "0.1.0"
+description = "FV-first autonomous desktop agent framework — pure VLM perception, no accessibility API"
+requires-python = ">=3.13"
+dependencies = [
+    "icontract>=2.7",
+    "openai>=1.82",
+]
+
+[project.scripts]
+strata = "strata.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.15",
+    "pytest>=8.3",
+    "hypothesis>=6.130",
+    "ruff>=0.11",
+]
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+warn_return_any = true
+disallow_any_generics = true
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ANN"]
+ignore = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --tb=short"
+markers = [
+    "live_llm: requires real LLM API keys and network access",
+    "integration: requires OSWorld Docker environment",
+]
+
+[tool.hypothesis]
+suppress_health_check = ["too_slow"]
