@@ -6,10 +6,13 @@ inline strategy definitions in test files are prohibited.
 
 from __future__ import annotations
 
+import os
+import tempfile
+
 import hypothesis.strategies as st
 from hypothesis.strategies import SearchStrategy
 
-from strata.core.types import TaskGraph, TaskNode
+from strata.core.types import CommandResult, TaskGraph, TaskNode
 
 _ALPHA_NUM = st.characters(categories=["L", "N"])
 _ALPHA = st.characters(categories=["L"])
@@ -92,3 +95,58 @@ def st_task_node_strategy() -> SearchStrategy[TaskNode]:
 def st_task_graph_strategy() -> SearchStrategy[TaskGraph]:
     """Convenience wrapper returning the composite strategy."""
     return st_task_graph()
+
+
+# ── Sandbox path strategy ──
+
+
+@st.composite
+def st_sandbox_path(
+    draw: st.DrawFn,
+) -> tuple[str, str, bool]:
+    """Generate (sandbox_root, path, should_escape) tuples for SandboxGuard testing.
+
+    Creates a real temporary directory as the sandbox root, then generates
+    either a safe intra-sandbox path or an escaping path with ``..`` traversal.
+    """
+    sandbox_root = tempfile.mkdtemp(prefix="strata_sb_")
+
+    escape = draw(st.booleans())
+    if escape:
+        depth = draw(st.integers(min_value=2, max_value=5))
+        path = os.path.join(*([os.pardir] * depth), "etc", "passwd")
+        return (sandbox_root, path, True)
+    else:
+        segments = draw(
+            st.lists(
+                st.text(
+                    alphabet=st.characters(categories=["L", "N"]),
+                    min_size=1,
+                    max_size=8,
+                ),
+                min_size=1,
+                max_size=4,
+            )
+        )
+        path = os.path.join(*segments)
+        return (sandbox_root, path, False)
+
+
+# ── CommandResult strategy ──
+
+
+@st.composite
+def st_command_result(draw: st.DrawFn) -> CommandResult:
+    """Generate CommandResult with valid field combinations.
+
+    Ensures timed_out and interrupted_by_silence are never both True.
+    """
+    timed_out = draw(st.booleans())
+    interrupted = False if timed_out else draw(st.booleans())
+    return CommandResult(
+        stdout=draw(st.text(max_size=200)),
+        stderr=draw(st.text(max_size=200)),
+        returncode=draw(st.integers(min_value=-128, max_value=255)),
+        timed_out=timed_out,
+        interrupted_by_silence=interrupted,
+    )
