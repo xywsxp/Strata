@@ -16,6 +16,10 @@ class ConfigError(StrataError):
     """Configuration loading, parsing, or validation failure."""
 
 
+class SerializationError(StrataError):
+    """Failure to (de)serialize a value object (task node/graph, checkpoint, ...)."""
+
+
 # ── Security ──
 
 
@@ -53,6 +57,41 @@ class MaxIterationsExceededError(HarnessError):
     """A loop (repeat / for_each) exceeded its configured iteration cap."""
 
 
+class ContextError(HarnessError):
+    """Working memory / context extraction failure."""
+
+
+class PersistenceError(HarnessError):
+    """Checkpoint save/load failure."""
+
+
+class PersistenceSchemaVersionError(PersistenceError):
+    """Checkpoint schema version is missing or unsupported."""
+
+
+# ── Orchestration (L2 subset) ──
+
+
+class OrchestrationError(HarnessError):
+    """Raised when the agent main loop cannot complete a goal lifecycle."""
+
+
+class UnknownActionError(OrchestrationError):
+    """Raised when a TaskNode.action is absent from ACTION_VOCABULARY."""
+
+
+class ActionParamsError(OrchestrationError):
+    """Raised when a TaskNode.params set is missing required keys or wrong types."""
+
+
+class GoalDecompositionError(OrchestrationError):
+    """Raised when ``decompose_goal`` fails terminally after its internal retries."""
+
+
+class PlanConfirmationAbortedError(OrchestrationError):
+    """Raised when the user rejects the plan at the CONFIRMING gate."""
+
+
 # ── Grounding (L3) ──
 
 
@@ -79,15 +118,15 @@ class SensitiveContentError(GroundingError):
 # ── Environment (L4) ──
 
 
-class EnvironmentError(StrataError):
+class StrataEnvironmentError(StrataError):
     """Environment adapter failure (within strata namespace — no builtin conflict)."""
 
 
-class UnsupportedPlatformError(EnvironmentError):
+class UnsupportedPlatformError(StrataEnvironmentError):
     """The current OS platform has no implemented adapter."""
 
 
-class CommandTimeoutError(EnvironmentError):
+class CommandTimeoutError(StrataEnvironmentError):
     """A terminal command exceeded its wall-clock timeout."""
 
 
@@ -95,7 +134,7 @@ class SilenceTimeoutError(CommandTimeoutError):
     """A terminal command produced no output for longer than the silence threshold."""
 
 
-class OSWorldConnectionError(EnvironmentError):
+class OSWorldConnectionError(StrataEnvironmentError):
     """Failed to connect to the OSWorld Docker/VM backend."""
 
 
@@ -108,6 +147,14 @@ class LLMError(StrataError):
 
 class LLMAPIError(LLMError):
     """Wraps provider SDK exceptions (network, auth, quota, etc.)."""
+
+
+class LLMTransientError(LLMAPIError):
+    """Transient LLM failure safe to retry (network, rate-limit, 5xx)."""
+
+
+class LLMPermanentError(LLMAPIError):
+    """Permanent LLM failure — retry would not help (auth, 4xx, malformed)."""
 
 
 class LLMFeatureNotSupportedError(LLMError):

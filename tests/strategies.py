@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import os
 import tempfile
+from collections.abc import Mapping, Sequence
 
 import hypothesis.strategies as st
 from hypothesis.strategies import SearchStrategy
 
-from strata.core.types import CommandResult, Coordinate, TaskGraph, TaskNode
+from strata.core.types import ActionResult, CommandResult, Coordinate, TaskGraph, TaskNode
+from strata.harness.actions import ACTION_PARAM_SCHEMA, ACTION_VOCABULARY
 
 _ALPHA_NUM = st.characters(categories=["L", "N"])
 _ALPHA = st.characters(categories=["L"])
@@ -152,16 +154,156 @@ def st_coordinate(
 
 @st.composite
 def st_command_result(draw: st.DrawFn) -> CommandResult:
-    """Generate CommandResult with valid field combinations.
+    """Generate a successful CommandResult.
 
-    Ensures timed_out and interrupted_by_silence are never both True.
+    Timeouts / silence interruptions are exceptions, not fields — this strategy
+    models only the success / non-zero-exit outcomes that `run_command` may
+    legitimately return.
     """
-    timed_out = draw(st.booleans())
-    interrupted = False if timed_out else draw(st.booleans())
     return CommandResult(
         stdout=draw(st.text(max_size=200)),
         stderr=draw(st.text(max_size=200)),
         returncode=draw(st.integers(min_value=-128, max_value=255)),
-        timed_out=timed_out,
-        interrupted_by_silence=interrupted,
     )
+
+
+# ── Action vocabulary strategies ──
+
+
+def st_action_name(valid: bool = True) -> SearchStrategy[str]:
+    """Draw an action name.
+
+    When ``valid`` is True, samples uniformly from :data:`ACTION_VOCABULARY`.
+    When ``valid`` is False, samples random ASCII strings deliberately chosen
+    to fall outside the vocabulary (prefix ``__bad_`` guarantees disjointness).
+    """
+    if valid:
+        return st.sampled_from(ACTION_VOCABULARY)
+    return st.text(
+        min_size=1,
+        max_size=15,
+        alphabet=_ALPHA_NUM,
+    ).map(lambda s: f"__bad_{s}")
+
+
+def _params_for_action(draw: st.DrawFn, action: str) -> Mapping[str, object]:
+    """Fill the required params for ``action`` with typed dummy values."""
+    required = ACTION_PARAM_SCHEMA[action]
+    out: dict[str, object] = {}
+    for key in sorted(required):
+        if key in ("x", "y"):
+            out[key] = float(draw(st.floats(min_value=0.0, max_value=1000.0, allow_nan=False)))
+        elif key in ("delta_x", "delta_y"):
+            out[key] = int(draw(st.integers(min_value=-100, max_value=100)))
+        elif key == "keys":
+            out[key] = draw(
+                st.lists(
+                    st.text(min_size=1, max_size=5, alphabet=_ALPHA),
+                    min_size=1,
+                    max_size=3,
+                )
+            )
+        elif key == "encoding":
+            out[key] = "utf-8"
+        elif key == "timeout":
+            out[key] = 30.0
+        else:
+            out[key] = draw(st.text(min_size=1, max_size=20, alphabet=_ALPHA_NUM))
+    return out
+
+
+@st.composite
+def st_primitive_task_node(
+    draw: st.DrawFn,
+    action: str | None = None,
+) -> TaskNode:
+    """Generate a primitive TaskNode with a valid action + required params."""
+    chosen = action if action is not None else draw(st.sampled_from(ACTION_VOCABULARY))
+    node_id = draw(st.text(min_size=1, max_size=20, alphabet=_ALPHA_NUM))
+    params = _params_for_action(draw, chosen)
+    return TaskNode(
+        id=node_id,
+        task_type="primitive",
+        action=chosen,
+        params=params,
+        method=None,
+        depends_on=(),
+        output_var=None,
+        max_iterations=None,
+    )
+
+
+@st.composite
+def st_invalid_primitive_task(draw: st.DrawFn) -> TaskNode:
+    """Generate an invalid primitive TaskNode.
+
+    Two failure modes: (a) action name is outside the vocabulary; (b) action
+    is valid but required params are dropped. Chosen randomly.
+    """
+    node_id = draw(st.text(min_size=1, max_size=20, alphabet=_ALPHA_NUM))
+    drop_params = draw(st.booleans())
+    if drop_params:
+        action = draw(st.sampled_from(ACTION_VOCABULARY))
+        required = ACTION_PARAM_SCHEMA[action]
+        if not required:
+            bad_name = draw(st_action_name(valid=False))
+            return TaskNode(
+                id=node_id,
+                task_type="primitive",
+                action=bad_name,
+                params={},
+            )
+        return TaskNode(
+            id=node_id,
+            task_type="primitive",
+            action=action,
+            params={},
+        )
+    bad_name = draw(st_action_name(valid=False))
+    return TaskNode(
+        id=node_id,
+        task_type="primitive",
+        action=bad_name,
+        params={},
+    )
+
+
+def st_failing_sequence(max_length: int = 10) -> SearchStrategy[Sequence[bool]]:
+    """Draw a non-empty bool sequence mapping to executor success/failure trace."""
+    return st.lists(st.booleans(), min_size=1, max_size=max_length).map(tuple)
+
+
+class _DeterministicExecutor:
+    """Mock TaskExecutor returning pre-scripted success/failure results.
+
+    The executor honours the Protocol in ``strata.harness.scheduler`` purely
+    structurally: the ``execute`` method signature matches. Each call pops
+    the next boolean from the pattern; past the pattern's end the last value
+    repeats.
+    """
+
+    def __init__(self, pattern: Sequence[bool]) -> None:
+        self._pattern: tuple[bool, ...] = tuple(pattern) if pattern else (True,)
+        self._cursor: int = 0
+        self.calls: list[TaskNode] = []
+
+    def execute(self, task: TaskNode, context: Mapping[str, object]) -> ActionResult:
+        self.calls.append(task)
+        idx = min(self._cursor, len(self._pattern) - 1)
+        self._cursor += 1
+        ok = self._pattern[idx]
+        return ActionResult(
+            success=ok,
+            data={"call_index": idx} if ok else None,
+            error=None if ok else f"deterministic failure at call {idx}",
+        )
+
+
+@st.composite
+def st_deterministic_mock_executor(
+    draw: st.DrawFn,
+    success_pattern: Sequence[bool] | None = None,
+) -> _DeterministicExecutor:
+    """Draw a deterministic mock executor given (or sampled) success pattern."""
+    pattern = success_pattern if success_pattern is not None else draw(st_failing_sequence())
+    return _DeterministicExecutor(pattern)

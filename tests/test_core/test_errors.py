@@ -60,7 +60,33 @@ class TestExceptionHierarchyNoCrossPackage:
 
     def test_environment_error_in_strata_namespace(self) -> None:
         builtin_env_err: type[Exception] = OSError
-        assert err_mod.EnvironmentError is not builtin_env_err
+        assert err_mod.StrataEnvironmentError is not builtin_env_err
+        assert not hasattr(err_mod, "EnvironmentError"), (
+            "legacy EnvironmentError name must be removed to avoid builtin shadow"
+        )
 
     def test_silence_timeout_is_command_timeout_subclass(self) -> None:
         assert issubclass(err_mod.SilenceTimeoutError, err_mod.CommandTimeoutError)
+
+
+class TestOrchestrationExceptions:
+    """Assert the new orchestration exception subtree shape (Phase A.2)."""
+
+    def test_orchestration_error_subclass_of_harness_error(self) -> None:
+        assert issubclass(err_mod.OrchestrationError, err_mod.HarnessError)
+
+    def test_unknown_action_subclass_of_orchestration(self) -> None:
+        assert issubclass(err_mod.UnknownActionError, err_mod.OrchestrationError)
+
+    def test_action_params_subclass_of_orchestration(self) -> None:
+        assert issubclass(err_mod.ActionParamsError, err_mod.OrchestrationError)
+
+    def test_goal_decomposition_subclass_of_orchestration(self) -> None:
+        assert issubclass(err_mod.GoalDecompositionError, err_mod.OrchestrationError)
+
+    def test_plan_confirmation_aborted_subclass_of_orchestration(self) -> None:
+        assert issubclass(err_mod.PlanConfirmationAbortedError, err_mod.OrchestrationError)
+
+    def test_config_and_llm_not_orchestration(self) -> None:
+        assert not issubclass(err_mod.ConfigError, err_mod.OrchestrationError)
+        assert not issubclass(err_mod.LLMError, err_mod.OrchestrationError)
