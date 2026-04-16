@@ -261,15 +261,121 @@ class TestUnknownActionRejected:
 
 
 class TestTaskFailure:
-    def test_task_failure_reaches_failed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_perennial_failure_skips_to_complete(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With recovery enabled, a task that always fails is eventually SKIPPED
+        and the goal reaches COMPLETED. Phase C behaviour."""
         graph = _single_task_graph()
         _stub_decompose_goal(monkeypatch, graph)
 
         orch = _make_orchestrator(executor=_FailingExecutor(n_failures=99))
         result = orch.run_goal("list files")
 
+        assert result.final_state == "COMPLETED"
+        assert result.task_states["t1"] == "SKIPPED"
+
+    def test_retry_then_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A task that fails once then succeeds is retried and reaches COMPLETED."""
+        graph = _single_task_graph()
+        _stub_decompose_goal(monkeypatch, graph)
+
+        orch = _make_orchestrator(executor=_FailingExecutor(n_failures=1))
+        result = orch.run_goal("list files")
+
+        assert result.final_state == "COMPLETED"
+        assert result.task_states["t1"] == "SUCCEEDED"
+
+    def test_user_abort_on_escalation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When recovery escalates to USER_INTERVENTION and the UI says
+        ``abort``, the goal reaches FAILED."""
+        graph = _single_task_graph()
+        _stub_decompose_goal(monkeypatch, graph)
+
+        ui = RecordingUI(confirm=True, error_decision="abort")
+        # attempt_count needs to exceed 4 for USER_INTERVENTION
+        orch = _make_orchestrator(ui=ui, executor=_FailingExecutor(n_failures=99))
+        # Inject many retry failures: easiest is to spy on recovery counter
+        # indirectly: bump attempt_counts before run_goal.  We do this by
+        # patching RecoveryPipeline to always return USER_INTERVENTION.
+        from strata.harness.recovery import RecoveryAction, RecoveryLevel
+
+        monkeypatch.setattr(
+            orch._recovery,
+            "attempt_recovery",
+            lambda task, error, count: RecoveryAction(
+                level=RecoveryLevel.USER_INTERVENTION,
+                description="test",
+            ),
+        )
+        result = orch.run_goal("list files")
+
         assert result.final_state == "FAILED"
-        assert result.task_states["t1"] == "FAILED"
+        assert any(c[0] == "handle_error" for c in ui.calls)
+
+    def test_user_skip_on_escalation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        graph = _single_task_graph()
+        _stub_decompose_goal(monkeypatch, graph)
+
+        ui = RecordingUI(confirm=True, error_decision="skip")
+        orch = _make_orchestrator(ui=ui, executor=_FailingExecutor(n_failures=99))
+        from strata.harness.recovery import RecoveryAction, RecoveryLevel
+
+        monkeypatch.setattr(
+            orch._recovery,
+            "attempt_recovery",
+            lambda task, error, count: RecoveryAction(
+                level=RecoveryLevel.USER_INTERVENTION,
+                description="test",
+            ),
+        )
+        result = orch.run_goal("list files")
+
+        assert result.final_state == "COMPLETED"
+        assert result.task_states["t1"] == "SKIPPED"
+
+    def test_attempt_count_escalates_monotonically(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Each repeated failure of the same task must bump attempt_count by
+        exactly 1 before the recovery pipeline is consulted."""
+        graph = _single_task_graph()
+        _stub_decompose_goal(monkeypatch, graph)
+
+        seen_counts: list[int] = []
+        from strata.harness.recovery import RecoveryAction, RecoveryLevel
+
+        orch = _make_orchestrator(executor=_FailingExecutor(n_failures=99))
+
+        def _spy(task: TaskNode, error: Exception, count: int) -> RecoveryAction:
+            seen_counts.append(count)
+            # Force SKIP on the 4th attempt so the test terminates.
+            if count >= 4:
+                return RecoveryAction(level=RecoveryLevel.SKIP, description="done")
+            return RecoveryAction(level=RecoveryLevel.RETRY, description="retry")
+
+        monkeypatch.setattr(orch._recovery, "attempt_recovery", _spy)
+        orch.run_goal("list files")
+
+        # Counts must be strictly increasing starting from 1.
+        assert seen_counts == [1, 2, 3, 4]
+
+    def test_user_retry_then_succeed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        graph = _single_task_graph()
+        _stub_decompose_goal(monkeypatch, graph)
+
+        ui = RecordingUI(confirm=True, error_decision="retry")
+        orch = _make_orchestrator(ui=ui, executor=_FailingExecutor(n_failures=1))
+        from strata.harness.recovery import RecoveryAction, RecoveryLevel
+
+        monkeypatch.setattr(
+            orch._recovery,
+            "attempt_recovery",
+            lambda task, error, count: RecoveryAction(
+                level=RecoveryLevel.USER_INTERVENTION,
+                description="test",
+            ),
+        )
+        result = orch.run_goal("list files")
+
+        assert result.final_state == "COMPLETED"
+        assert result.task_states["t1"] == "SUCCEEDED"
 
 
 # ── Property: with mock executor, run_goal always terminates in COMPLETED/FAILED ──

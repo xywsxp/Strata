@@ -31,10 +31,11 @@ from strata.core.errors import (
     PlanConfirmationAbortedError,
     PlannerError,
 )
-from strata.core.types import ActionResult, GlobalState, TaskGraph, TaskState
+from strata.core.types import ActionResult, GlobalState, TaskGraph, TaskNode, TaskState
 from strata.env.protocols import EnvironmentBundle
 from strata.harness.actions import ACTION_VOCABULARY
 from strata.harness.executor import PrimitiveTaskExecutor
+from strata.harness.recovery import RecoveryAction, RecoveryLevel, RecoveryPipeline
 from strata.harness.scheduler import LinearRunner, TaskExecutor
 from strata.harness.state_machine import (
     GlobalEvent,
@@ -42,6 +43,7 @@ from strata.harness.state_machine import (
     create_global_state_machine,
 )
 from strata.llm.router import LLMRouter
+from strata.planner.adjuster import Adjustment, adjust_plan, apply_adjustment
 from strata.planner.htn import decompose_goal
 
 
@@ -102,8 +104,10 @@ class AgentOrchestrator:
             executor if executor is not None else PrimitiveTaskExecutor(bundle=bundle)
         )
         self._runner = LinearRunner(config)
+        self._recovery = RecoveryPipeline(config, self._adjuster)
         self._state_machine: StateMachine[GlobalState, GlobalEvent]
         self._last_graph: TaskGraph | None = None
+        self._attempt_counts: dict[str, int] = {}
 
     @icontract.require(
         lambda goal: len(goal.strip()) > 0,
@@ -190,33 +194,232 @@ class AgentOrchestrator:
         return self._ui.confirm_plan()
 
     def _execute(self, graph: TaskGraph) -> dict[str, TaskState]:
-        task_states: dict[str, TaskState] = {t.id: "PENDING" for t in graph.tasks}
+        """Walk the task list with full per-task recovery. Entered in SCHEDULING.
 
-        # Schedule -> Execute in one shot for Phase B. Phase C will insert
-        # per-task transitions, recovery dispatch, and WAITING_USER.
-        self._fire("task_dispatched")
-        results = self._runner.run(graph, self._executor)
-        for task_id, result in results.items():
-            task_states[task_id] = _task_state_from_result(result)
-            self._ui.display_progress(task_id, task_states[task_id])
+        The task list is kept as a local mutable ``list[TaskNode]`` so that a
+        REPLAN recovery can splice replacement nodes in place. The persistent
+        ``self._last_graph`` is rebuilt whenever a REPLAN mutates the sequence
+        so that any later adjuster call has a consistent graph to look at.
 
-        any_failed = any(state == "FAILED" for state in task_states.values())
-        if any_failed:
-            # Phase B: any single-task failure ⇒ goal FAILED.  Phase C will
-            # route through RECOVERING before giving up.
+        # CONVENTION: attempt_count 按 task.id 独立累加；REPLAN 产出的新 id
+        # 从 0 起步（RecoveryPipeline 单调升级前提）。
+        """
+        tasks: list[TaskNode] = list(graph.tasks)
+        task_states: dict[str, TaskState] = {t.id: "PENDING" for t in tasks}
+        context: dict[str, object] = {}
+
+        idx = 0
+        while idx < len(tasks):
+            if self._ui.interrupted:
+                self._transition_to_failed_via_waiting()
+                raise _OrchestratorAbort(
+                    error=OrchestrationError("interrupted by user"),
+                    task_states=task_states,
+                )
+
+            task = tasks[idx]
+            self._fire("task_dispatched")
+            task_states[task.id] = "RUNNING"
+            self._ui.display_progress(task.id, "RUNNING")
+
+            result = self._run_single(task, context)
+
+            if result.success:
+                task_states[task.id] = "SUCCEEDED"
+                self._ui.display_progress(task.id, "SUCCEEDED")
+                if task.output_var and result.data:
+                    context[task.output_var] = result.data
+                self._fire("task_done")
+                idx += 1
+                continue
+
+            # Failure path: SCHEDULING ← EXECUTING via task_failed.
             self._fire("task_failed")
-            # RECOVERING -> unrecoverable (no recovery wired yet in Phase B)
-            self._fire("unrecoverable")
-            raise _OrchestratorAbort(
-                error=OrchestrationError(
-                    f"{sum(1 for s in task_states.values() if s == 'FAILED')} task(s) failed"
-                ),
-                task_states=task_states,
+            self._attempt_counts[task.id] = self._attempt_counts.get(task.id, 0) + 1
+            error_exc = _result_to_exception(result)
+            recovery = self._recovery.attempt_recovery(
+                task, error_exc, self._attempt_counts[task.id]
             )
 
-        self._fire("task_done")
+            decision = self._apply_recovery(
+                recovery=recovery,
+                task=task,
+                task_states=task_states,
+                error_exc=error_exc,
+                tasks=tasks,
+                idx=idx,
+            )
+
+            if decision.outcome == "retry":
+                continue
+            if decision.outcome == "advance":
+                idx += 1
+                continue
+            if decision.outcome == "replan":
+                # tasks list already spliced in place; retry the current index.
+                continue
+            if decision.outcome == "skip":
+                task_states[task.id] = "SKIPPED"
+                self._ui.display_progress(task.id, "SKIPPED")
+                idx += 1
+                continue
+            # decision.outcome == "abort"
+            assert decision.error is not None  # invariant: abort carries an error
+            raise _OrchestratorAbort(error=decision.error, task_states=task_states)
+
+        # All tasks consumed: SCHEDULING → all_done → COMPLETED.
         self._fire("all_done")
         return task_states
+
+    def _run_single(self, task: TaskNode, context: Mapping[str, object]) -> ActionResult:
+        """Execute *task*. Control-flow nodes are delegated to LinearRunner."""
+        if task.task_type in ("repeat", "if_then", "for_each"):
+            # Reuse LinearRunner's interpreter for loop/branch nodes.
+            return self._runner._execute_task(task, self._executor, dict(context))
+        return self._executor.execute(task, context)
+
+    def _apply_recovery(
+        self,
+        *,
+        recovery: RecoveryAction,
+        task: TaskNode,
+        task_states: dict[str, TaskState],
+        error_exc: Exception,
+        tasks: list[TaskNode],
+        idx: int,
+    ) -> _RecoveryDecision:
+        """Translate a :class:`RecoveryAction` into a loop control outcome.
+
+        The state machine transitions are a by-product of the decision.
+        """
+        level = recovery.level
+        if level is RecoveryLevel.RETRY or level is RecoveryLevel.ALTERNATIVE:
+            self._fire("recovered")
+            task_states[task.id] = "PENDING"
+            return _RecoveryDecision(outcome="retry")
+
+        if level is RecoveryLevel.REPLAN:
+            if recovery.replacement_task is None:
+                # RecoveryPipeline promised REPLAN but produced no node —
+                # collapse to SKIP defensively.
+                self._fire("recovered")
+                return _RecoveryDecision(outcome="skip")
+            self._splice_replan(tasks=tasks, idx=idx, task=task, task_states=task_states)
+            self._fire("recovered")
+            return _RecoveryDecision(outcome="replan")
+
+        if level is RecoveryLevel.SKIP:
+            self._fire("recovered")
+            return _RecoveryDecision(outcome="skip")
+
+        # USER_INTERVENTION → WAITING_USER → handle_error.
+        self._fire("escalated")
+        choice = self._ui.handle_error(task.id, error_exc)
+        if choice == "retry":
+            self._fire("user_decision")
+            task_states[task.id] = "PENDING"
+            return _RecoveryDecision(outcome="retry")
+        if choice == "skip":
+            self._fire("user_decision")
+            return _RecoveryDecision(outcome="skip")
+        # choice == "abort"
+        self._fire("user_abort")
+        return _RecoveryDecision(
+            outcome="abort",
+            error=OrchestrationError(f"user aborted at task {task.id!r}: {error_exc}"),
+        )
+
+    def _splice_replan(
+        self,
+        *,
+        tasks: list[TaskNode],
+        idx: int,
+        task: TaskNode,
+        task_states: dict[str, TaskState],
+    ) -> None:
+        """Apply a REPLAN adjustment to *tasks* in place.
+
+        Implementation detail: the RecoveryPipeline only hands us a single
+        ``replacement_task`` (its public contract is a ``Sequence[TaskNode]``
+        reduced to the first element). We construct an :class:`Adjustment`
+        with ``strategy="replace"`` and delegate to :func:`apply_adjustment`
+        for the full validation pass; if that fails we fall back to an
+        in-place swap to keep the agent moving.
+        """
+        assert self._last_graph is not None
+        replacement = [t for t in [getattr(self._recovery, "_last_replacement", None)] if t]
+        # NOTE: RecoveryPipeline only returns the first replacement — we ask
+        # the adjuster directly for the full set so the graph stays coherent.
+        try:
+            adjustment = adjust_plan(
+                self._last_graph,
+                task.id,
+                {"attempt": self._attempt_counts.get(task.id, 0)},
+                self._llm_router,
+            )
+            new_graph = apply_adjustment(self._last_graph, adjustment)
+        except Exception:
+            # Fallback: use the single node the pipeline produced.
+            fallback_nodes: list[TaskNode] = []
+            if replacement:
+                fallback_nodes.extend(replacement)
+            if not fallback_nodes:
+                return
+            adjustment = Adjustment(
+                original_task_id=task.id,
+                replacement_tasks=tuple(fallback_nodes),
+                strategy="replace",
+            )
+            try:
+                new_graph = apply_adjustment(self._last_graph, adjustment)
+            except PlannerError:
+                return
+
+        self._last_graph = new_graph
+        tasks[:] = list(new_graph.tasks)
+        del task_states[task.id]
+        for node in new_graph.tasks:
+            task_states.setdefault(node.id, "PENDING")
+
+    def _adjuster(self, failed_task: TaskNode, error: Exception) -> list[TaskNode]:
+        """Adjuster closure handed to :class:`RecoveryPipeline`.
+
+        Contract: may return ``[]`` to signal "no adjustment possible" (pipeline
+        will escalate to SKIP). Any exception from the underlying LLM call is
+        caught here — the recovery pipeline must remain robust in the face of
+        a misbehaving planner adapter.
+
+        # CONVENTION: 宽口径 except Exception — LLM 适配器可能抛出非 PlannerError
+        # 的底层异常（网络/解析/Mock 配置错误）。Adjuster 失败即退化为 SKIP。
+        """
+        if self._last_graph is None:
+            return []
+        try:
+            adjustment = adjust_plan(
+                self._last_graph,
+                failed_task.id,
+                {
+                    "error_type": type(error).__name__,
+                    "error_msg": str(error),
+                },
+                self._llm_router,
+            )
+        except Exception:
+            return []
+        return list(adjustment.replacement_tasks)
+
+    def _transition_to_failed_via_waiting(self) -> None:
+        """If the state machine is in EXECUTING, take a conservative path
+        ``EXECUTING → task_failed → RECOVERING → unrecoverable`` to reach
+        ``FAILED`` respecting the declared legal transitions. Used when the
+        user interrupts mid-loop.
+        """
+        state = self._state_machine.state
+        if state == "SCHEDULING":
+            # Inject a no-op EXECUTING round trip so ``task_failed`` is legal.
+            self._fire("task_dispatched")
+        self._fire("task_failed")
+        self._fire("unrecoverable")
 
     # ── state machine helpers ──
 
@@ -260,8 +463,29 @@ class _OrchestratorAbort(Exception):
         self.task_states: Mapping[str, TaskState] = task_states or {}
 
 
-def _task_state_from_result(result: ActionResult) -> TaskState:
-    return "SUCCEEDED" if result.success else "FAILED"
+@dataclass(frozen=True)
+class _RecoveryDecision:
+    """Loop control outcome produced by :meth:`AgentOrchestrator._apply_recovery`.
+
+    - ``retry``:   rerun the current task (attempt_count already bumped)
+    - ``advance``: move to the next task (legacy — currently unused path)
+    - ``replan``:  graph was mutated; restart at the same index
+    - ``skip``:    mark current task SKIPPED and advance
+    - ``abort``:   terminate the run with ``error``
+    """
+
+    outcome: Literal["retry", "advance", "replan", "skip", "abort"]
+    error: StrataError | None = None
+
+
+def _result_to_exception(result: ActionResult) -> Exception:
+    """Synthesise an Exception instance for downstream adjuster / handle_error
+    based on an ``ActionResult.error`` message. Using a plain ``Exception``
+    here (not a :class:`StrataError`) because the underlying adapter already
+    converted any domain error to a message in the executor layer.
+    """
+    msg = result.error or "action failed"
+    return Exception(msg)
 
 
 __all__ = [
