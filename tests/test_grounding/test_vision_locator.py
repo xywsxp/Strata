@@ -118,3 +118,45 @@ class TestLocateWithScrollDisabled:
         locator = VisionLocator(_make_gui(), router, config)
         result = locator.locate_with_scroll("element")
         assert result == Coordinate(x=100.0, y=200.0)
+
+
+class TestParseVLMResponseErrorWrapping:
+    def test_non_numeric_x_raises_vision_locator_error(self) -> None:
+        resp = json.dumps({"action_type": "click", "x": "left", "y": 10})
+        router = _make_router_with_responses(resp)
+        locator = VisionLocator(_make_gui(), router, _default_gui_config())
+        with pytest.raises(VisionLocatorError, match="non-numeric"):
+            locator.locate("button")
+
+    def test_non_numeric_confidence_raises(self) -> None:
+        resp = json.dumps({"action_type": "click", "x": 1, "y": 2, "confidence": "high"})
+        router = _make_router_with_responses(resp)
+        locator = VisionLocator(_make_gui(), router, _default_gui_config())
+        with pytest.raises(VisionLocatorError, match="non-numeric"):
+            locator.locate("button")
+
+    def test_invalid_scroll_direction_rejected(self) -> None:
+        resp = json.dumps({"action_type": "scroll", "direction": "sideways"})
+        router = _make_router_with_responses(resp)
+        locator = VisionLocator(_make_gui(), router, _default_gui_config())
+        with pytest.raises(VisionLocatorError, match="invalid scroll direction"):
+            locator.locate_with_scroll("element")
+
+    def test_scroll_without_direction_rejected(self) -> None:
+        resp = json.dumps({"action_type": "scroll"})
+        router = _make_router_with_responses(resp)
+        locator = VisionLocator(_make_gui(), router, _default_gui_config())
+        with pytest.raises(VisionLocatorError, match="invalid scroll direction"):
+            locator.locate_with_scroll("element")
+
+
+class TestLiveScreenBounds:
+    def test_screen_size_queried_on_each_locate(self) -> None:
+        """Bounds contract uses live get_screen_size, not a ctor-cached value."""
+        resp = json.dumps({"action_type": "click", "x": 10, "y": 10, "confidence": 0.9})
+        router = _make_router_with_responses(resp)
+        gui = _make_gui(w=1920, h=1080)
+        locator = VisionLocator(gui, router, _default_gui_config())
+        call_count_before = gui.get_screen_size.call_count
+        locator.locate("button")
+        assert gui.get_screen_size.call_count > call_count_before

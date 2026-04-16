@@ -17,8 +17,12 @@ removes the "who constructs whom" ambiguity.
 
 from __future__ import annotations
 
+import contextlib
+import os
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
 import icontract
@@ -28,8 +32,10 @@ from strata.core.config import StrataConfig
 from strata.core.errors import (
     GoalDecompositionError,
     OrchestrationError,
+    PersistenceSchemaVersionError,
     PlanConfirmationAbortedError,
     PlannerError,
+    SerializationError,
 )
 from strata.core.types import ActionResult, GlobalState, TaskGraph, TaskNode, TaskState
 from strata.env.protocols import EnvironmentBundle
@@ -37,8 +43,10 @@ from strata.grounding.terminal_handler import TerminalHandler
 from strata.grounding.validator import ActionValidator
 from strata.grounding.vision_locator import VisionLocator
 from strata.harness.actions import ACTION_VOCABULARY
+from strata.harness.context import AuditLogger, ContextManager
 from strata.harness.executor import PrimitiveTaskExecutor
 from strata.harness.gui_lock import GUILock
+from strata.harness.persistence import Checkpoint, PersistenceManager
 from strata.harness.recovery import RecoveryAction, RecoveryLevel, RecoveryPipeline
 from strata.harness.scheduler import LinearRunner, TaskExecutor
 from strata.harness.state_machine import (
@@ -66,6 +74,8 @@ class AgentUI(Protocol):
     def display_plan(self, graph: TaskGraph) -> None: ...
 
     def confirm_plan(self) -> bool: ...
+
+    def confirm_resume(self, saved_goal: str, task_count: int) -> bool: ...
 
     def display_progress(self, task_id: str, state: TaskState) -> None: ...
 
@@ -104,6 +114,11 @@ class AgentOrchestrator:
         # CONVENTION: llm_router 可选注入 —— 生产路径由 __main__ 构造一次；
         # 测试可传 mock 免去 OpenAI 客户端构造的网络依赖。
         self._llm_router = llm_router if llm_router is not None else LLMRouter(config)
+        self._audit_logger = AuditLogger(config.audit_log)
+        self._context = ContextManager(config.memory)
+        # CONVENTION: state_dir 在 StrataConfig 未公开字段之前硬编码到
+        # ~/.strata/state；Phase 6 后如需环境隔离再下沉为配置项。
+        self._persistence = PersistenceManager(_default_state_dir())
         # CONVENTION: 生产路径下所有 grounding 组件由 Orchestrator 构造并注入
         # PrimitiveTaskExecutor；测试可直接传 executor 绕过构造链。
         if executor is None:
@@ -117,6 +132,7 @@ class AgentOrchestrator:
                 terminal_handler=self._terminal_handler,
                 gui_lock=self._gui_lock,
                 action_validator=self._action_validator,
+                audit_logger=self._audit_logger,
             )
         else:
             self._executor = executor
@@ -125,6 +141,8 @@ class AgentOrchestrator:
         self._state_machine: StateMachine[GlobalState, GlobalEvent]
         self._last_graph: TaskGraph | None = None
         self._attempt_counts: dict[str, int] = {}
+        self._task_states: dict[str, TaskState] = {}
+        self._current_goal: str = ""
 
     @icontract.require(
         lambda goal: len(goal.strip()) > 0,
@@ -140,28 +158,48 @@ class AgentOrchestrator:
         The state machine enforces legal transitions; any transition violation
         surfaces as :class:`StateTransitionError` and is caught here to produce
         a FAILED result with the violation as the ``error`` field.
+
+        Startup checkpoint recovery (Q5 scheme a): if a valid checkpoint is
+        present the user is asked whether to resume; on yes the goal/task list
+        is restored and execution skips PLANNING/CONFIRMING; on no the
+        checkpoint is cleared and a fresh run proceeds.
         """
         self._state_machine = create_global_state_machine()
         self._last_graph = None
+        self._attempt_counts = {}
+        self._task_states = {}
+        self._current_goal = goal
+        self._context.clear()
         task_states: dict[str, TaskState] = {}
 
         try:
-            self._fire("receive_goal")
-            graph = self._plan(goal)
-            self._last_graph = graph
-            self._fire("plan_ready")
+            resumed = self._try_resume()
+            if resumed is None:
+                self._fire("receive_goal")
+                graph = self._plan(goal)
+                self._last_graph = graph
+                self._task_states = {t.id: "PENDING" for t in graph.tasks}
+                self._save_checkpoint()
+                self._fire("plan_ready")
 
-            if not self._confirm(graph):
-                self._fire("user_abort")
-                return ExecutionResult(
-                    final_state="FAILED",
-                    task_states={},
-                    error=PlanConfirmationAbortedError("user rejected the plan"),
-                    graph=graph,
-                )
+                if not self._confirm(graph):
+                    self._fire("user_abort")
+                    self._persistence.clear_checkpoint()
+                    return ExecutionResult(
+                        final_state="FAILED",
+                        task_states={},
+                        error=PlanConfirmationAbortedError("user rejected the plan"),
+                        graph=graph,
+                    )
 
-            self._fire("user_confirm")
+                self._fire("user_confirm")
+            else:
+                graph = resumed
+
             task_states = self._execute(graph)
+            # Successful completion: clear checkpoint so next invocation
+            # starts fresh.
+            self._persistence.clear_checkpoint()
             return ExecutionResult(
                 final_state="COMPLETED",
                 task_states=task_states,
@@ -169,6 +207,7 @@ class AgentOrchestrator:
                 graph=graph,
             )
         except _OrchestratorAbort as abort:
+            # CONVENTION: FAILED 时保留 checkpoint（Q5 方案 a）以便下次 resume。
             return ExecutionResult(
                 final_state="FAILED",
                 task_states=abort.task_states,
@@ -222,7 +261,12 @@ class AgentOrchestrator:
         # 从 0 起步（RecoveryPipeline 单调升级前提）。
         """
         tasks: list[TaskNode] = list(graph.tasks)
-        task_states: dict[str, TaskState] = {t.id: "PENDING" for t in tasks}
+        # Prefer pre-populated states from resume; otherwise initialise PENDING.
+        task_states: dict[str, TaskState] = (
+            dict(self._task_states) if self._task_states else {t.id: "PENDING" for t in tasks}
+        )
+        for t in tasks:
+            task_states.setdefault(t.id, "PENDING")
         context: dict[str, object] = {}
 
         idx = 0
@@ -243,10 +287,19 @@ class AgentOrchestrator:
 
             if result.success:
                 task_states[task.id] = "SUCCEEDED"
+                self._task_states = dict(task_states)
                 self._ui.display_progress(task.id, "SUCCEEDED")
                 if task.output_var and result.data:
                     context[task.output_var] = result.data
+                self._context.add_entry(
+                    {
+                        "task_id": task.id,
+                        "action": task.action or task.task_type,
+                        "success": True,
+                    }
+                )
                 self._fire("task_done")
+                self._save_checkpoint()
                 idx += 1
                 continue
 
@@ -254,6 +307,14 @@ class AgentOrchestrator:
             self._fire("task_failed")
             self._attempt_counts[task.id] = self._attempt_counts.get(task.id, 0) + 1
             error_exc = _result_to_exception(result)
+            self._context.add_entry(
+                {
+                    "task_id": task.id,
+                    "action": task.action or task.task_type,
+                    "success": False,
+                    "error": str(error_exc),
+                }
+            )
             recovery = self._recovery.attempt_recovery(
                 task, error_exc, self._attempt_counts[task.id]
             )
@@ -268,16 +329,22 @@ class AgentOrchestrator:
             )
 
             if decision.outcome == "retry":
+                self._task_states = dict(task_states)
+                self._save_checkpoint()
                 continue
             if decision.outcome == "advance":
                 idx += 1
                 continue
             if decision.outcome == "replan":
                 # tasks list already spliced in place; retry the current index.
+                self._task_states = dict(task_states)
+                self._save_checkpoint()
                 continue
             if decision.outcome == "skip":
                 task_states[task.id] = "SKIPPED"
+                self._task_states = dict(task_states)
                 self._ui.display_progress(task.id, "SKIPPED")
+                self._save_checkpoint()
                 idx += 1
                 continue
             # decision.outcome == "abort"
@@ -367,11 +434,16 @@ class AgentOrchestrator:
         replacement = [t for t in [getattr(self._recovery, "_last_replacement", None)] if t]
         # NOTE: RecoveryPipeline only returns the first replacement — we ask
         # the adjuster directly for the full set so the graph stays coherent.
+        failure_context: Mapping[str, object] = {
+            "attempt": self._attempt_counts.get(task.id, 0),
+            "recent_actions": list(self._context.get_window()),
+            "facts": [{"key": f.key, "value": f.value} for f in self._context.get_facts()],
+        }
         try:
             adjustment = adjust_plan(
                 self._last_graph,
                 task.id,
-                {"attempt": self._attempt_counts.get(task.id, 0)},
+                failure_context,
                 self._llm_router,
             )
             new_graph = apply_adjustment(self._last_graph, adjustment)
@@ -406,24 +478,87 @@ class AgentOrchestrator:
         caught here — the recovery pipeline must remain robust in the face of
         a misbehaving planner adapter.
 
+        The ``failure_context`` passed to :func:`adjust_plan` is sourced from
+        the sliding :class:`ContextManager` window and fact slot so the LLM
+        sees the last few actions and recorded facts rather than only the
+        immediate error string (E.4).
+
         # CONVENTION: 宽口径 except Exception — LLM 适配器可能抛出非 PlannerError
         # 的底层异常（网络/解析/Mock 配置错误）。Adjuster 失败即退化为 SKIP。
         """
         if self._last_graph is None:
             return []
+        failure_context: Mapping[str, object] = {
+            "error_type": type(error).__name__,
+            "error_msg": str(error),
+            "recent_actions": list(self._context.get_window()),
+            "facts": [{"key": f.key, "value": f.value} for f in self._context.get_facts()],
+        }
         try:
             adjustment = adjust_plan(
                 self._last_graph,
                 failed_task.id,
-                {
-                    "error_type": type(error).__name__,
-                    "error_msg": str(error),
-                },
+                failure_context,
                 self._llm_router,
             )
         except Exception:
             return []
         return list(adjustment.replacement_tasks)
+
+    # ── persistence / resume ──
+
+    def _save_checkpoint(self) -> None:
+        """Persist current lifecycle snapshot. Never raises — persistence
+        failures (disk full, permissions) are not fatal for the run."""
+        if self._last_graph is None:
+            return
+        try:
+            cp = Checkpoint(
+                global_state=self._state_machine.state,
+                task_states=dict(self._task_states),
+                context={"goal": self._current_goal},
+                task_graph=self._last_graph,
+                timestamp=time.time(),
+            )
+            self._persistence.save_checkpoint(cp)
+        except (OSError, SerializationError):
+            # CONVENTION: checkpoint 保存失败不中断主循环，只影响 resume 能力。
+            return
+
+    def _try_resume(self) -> TaskGraph | None:
+        """Ask the user whether to resume a pre-existing checkpoint.
+
+        Returns the restored :class:`TaskGraph` when the user confirms resume;
+        otherwise clears the checkpoint and returns ``None``. A corrupt or
+        schema-mismatched checkpoint is silently cleared (never offered).
+        """
+        try:
+            cp = self._persistence.load_checkpoint()
+        except (PersistenceSchemaVersionError, SerializationError, OSError):
+            # Stale / corrupt / schema-mismatched checkpoint → discard.
+            with contextlib.suppress(OSError):
+                self._persistence.clear_checkpoint()
+            return None
+
+        if cp is None:
+            return None
+
+        saved_goal = str(cp.context.get("goal", "<unknown>"))
+        task_count = len(cp.task_graph.tasks)
+
+        if not self._ui.confirm_resume(saved_goal, task_count):
+            with contextlib.suppress(OSError):
+                self._persistence.clear_checkpoint()
+            return None
+
+        # Restore the saved state and jump straight into SCHEDULING.
+        self._fire("receive_goal")
+        self._last_graph = cp.task_graph
+        self._task_states = dict(cp.task_states)
+        self._current_goal = saved_goal
+        self._fire("plan_ready")
+        self._fire("user_confirm")
+        return cp.task_graph
 
     def _transition_to_failed_via_waiting(self) -> None:
         """If the state machine is in EXECUTING, take a conservative path
@@ -493,6 +628,18 @@ class _RecoveryDecision:
 
     outcome: Literal["retry", "advance", "replan", "skip", "abort"]
     error: StrataError | None = None
+
+
+def _default_state_dir() -> str:
+    """Default checkpoint directory (~/.strata/state) with env override.
+
+    # CONVENTION: STRATA_STATE_DIR 环境变量可覆盖默认路径，便于测试隔离；
+    # 生产环境下固定 ~/.strata/state。
+    """
+    env = os.environ.get("STRATA_STATE_DIR")
+    if env:
+        return env
+    return str(Path.home() / ".strata" / "state")
 
 
 def _result_to_exception(result: ActionResult) -> Exception:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 from unittest.mock import MagicMock
 
@@ -26,6 +27,17 @@ from strata.harness.scheduler import TaskExecutor
 from ..strategies import _DeterministicExecutor, st_failing_sequence
 from .test_executor import MockAppManager, MockFileSystem, MockGUI, MockSystem, MockTerminal
 
+
+@pytest.fixture(autouse=True)
+def _isolate_state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate every Orchestrator test into a fresh ``STRATA_STATE_DIR``.
+
+    Without this, Phase E's checkpoint persistence would pollute the real
+    ``~/.strata/state`` and cause cross-test interference.
+    """
+    monkeypatch.setenv("STRATA_STATE_DIR", str(tmp_path))
+
+
 # ── Test helpers ──
 
 
@@ -34,6 +46,7 @@ class RecordingUI:
     """Minimal AgentUI implementation that records calls."""
 
     confirm: bool = True
+    resume_yes: bool = False
     interrupted_flag: bool = False
     error_decision: Literal["retry", "skip", "abort"] = "abort"
     destructive_allow: bool = True
@@ -49,6 +62,10 @@ class RecordingUI:
     def confirm_plan(self) -> bool:
         self.calls.append(("confirm_plan", None))
         return self.confirm
+
+    def confirm_resume(self, saved_goal: str, task_count: int) -> bool:
+        self.calls.append(("confirm_resume", (saved_goal, task_count)))
+        return self.resume_yes
 
     def display_progress(self, task_id: str, state: TaskState) -> None:
         self.calls.append(("display_progress", (task_id, state)))
@@ -451,6 +468,247 @@ class TestVisionLocatorCacheRemoved:
             "router",
             "config",
         )
+
+
+# ── Phase E: persistence + audit + context ──
+
+
+class TestCheckpointPersistence:
+    def test_checkpoint_cleared_on_completed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("STRATA_STATE_DIR", str(tmp_path))
+        graph = _single_task_graph()
+        _stub_decompose_goal(monkeypatch, graph)
+        orch = _make_orchestrator(executor=_FixedGraphExecutor())
+
+        result = orch.run_goal("list files")
+
+        assert result.final_state == "COMPLETED"
+        assert not (tmp_path / "checkpoint.json").exists()
+
+    def test_checkpoint_preserved_on_failed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """On user-abort (FAILED) the checkpoint is retained for resume.
+        Q5 scheme a."""
+        monkeypatch.setenv("STRATA_STATE_DIR", str(tmp_path))
+        graph = _single_task_graph()
+        _stub_decompose_goal(monkeypatch, graph)
+        ui = RecordingUI(confirm=True, error_decision="abort")
+
+        from strata.harness.recovery import RecoveryAction, RecoveryLevel
+
+        orch = _make_orchestrator(ui=ui, executor=_FailingExecutor(n_failures=99))
+        monkeypatch.setattr(
+            orch._recovery,
+            "attempt_recovery",
+            lambda task, error, count: RecoveryAction(
+                level=RecoveryLevel.USER_INTERVENTION,
+                description="test",
+            ),
+        )
+        result = orch.run_goal("list files")
+
+        assert result.final_state == "FAILED"
+        # Checkpoint left behind for the next run.
+        assert (tmp_path / "checkpoint.json").exists()
+
+    def test_checkpoint_written_incrementally(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Each successful task bump triggers a save_checkpoint call."""
+        monkeypatch.setenv("STRATA_STATE_DIR", str(tmp_path))
+        two_task = TaskGraph(
+            goal="two tasks",
+            tasks=(
+                TaskNode(
+                    id="a",
+                    task_type="primitive",
+                    action="list_directory",
+                    params={"path": "/"},
+                ),
+                TaskNode(
+                    id="b",
+                    task_type="primitive",
+                    action="list_directory",
+                    params={"path": "/"},
+                ),
+            ),
+        )
+        _stub_decompose_goal(monkeypatch, two_task)
+        orch = _make_orchestrator(executor=_FixedGraphExecutor())
+
+        save_calls: list[int] = []
+        original = orch._persistence.save_checkpoint
+        from strata.harness.persistence import Checkpoint
+
+        def _spy(cp: Checkpoint) -> None:
+            save_calls.append(len(cp.task_states))
+            original(cp)
+
+        monkeypatch.setattr(orch._persistence, "save_checkpoint", _spy)
+
+        orch.run_goal("two tasks")
+
+        assert len(save_calls) >= 2  # initial + per-task
+
+
+class TestResumeFromCheckpoint:
+    def test_resume_yes_skips_planning(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """If a checkpoint exists and the user says yes, run_goal skips
+        decompose_goal / confirm_plan and jumps to execution."""
+        monkeypatch.setenv("STRATA_STATE_DIR", str(tmp_path))
+        graph = _single_task_graph()
+
+        # First run: leave a checkpoint behind by making the task fail + abort.
+        from strata.harness.recovery import RecoveryAction, RecoveryLevel
+
+        _stub_decompose_goal(monkeypatch, graph)
+        ui1 = RecordingUI(confirm=True, error_decision="abort")
+        orch1 = _make_orchestrator(ui=ui1, executor=_FailingExecutor(n_failures=99))
+        monkeypatch.setattr(
+            orch1._recovery,
+            "attempt_recovery",
+            lambda task, error, count: RecoveryAction(
+                level=RecoveryLevel.USER_INTERVENTION,
+                description="t",
+            ),
+        )
+        orch1.run_goal("list files")
+        assert (tmp_path / "checkpoint.json").exists()
+
+        # Second run: new orchestrator, checkpoint on disk, user says yes.
+        plan_calls: list[str] = []
+
+        def _unreachable_decompose(
+            goal: str,
+            router: object,
+            actions: Sequence[str],
+            context: Mapping[str, object] | None = None,
+        ) -> TaskGraph:
+            plan_calls.append(goal)
+            return graph
+
+        monkeypatch.setattr("strata.harness.orchestrator.decompose_goal", _unreachable_decompose)
+
+        ui2 = RecordingUI(confirm=True, resume_yes=True)
+        orch2 = _make_orchestrator(ui=ui2, executor=_FixedGraphExecutor())
+        result = orch2.run_goal("list files")
+
+        assert result.final_state == "COMPLETED"
+        assert any(c[0] == "confirm_resume" for c in ui2.calls)
+        # confirm_plan not called (resume path skips PLANNING/CONFIRMING).
+        assert not any(c[0] == "confirm_plan" for c in ui2.calls)
+        assert plan_calls == []  # decompose_goal not called
+
+    def test_resume_no_runs_fresh_plan(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """If the user declines to resume, the orchestrator clears the
+        checkpoint and runs a normal PLANNING cycle."""
+        monkeypatch.setenv("STRATA_STATE_DIR", str(tmp_path))
+
+        # Seed a checkpoint manually via the PersistenceManager.
+        from strata.core.types import TaskGraph as TG
+        from strata.harness.persistence import Checkpoint, PersistenceManager
+
+        pm = PersistenceManager(str(tmp_path))
+        pm.save_checkpoint(
+            Checkpoint(
+                global_state="SCHEDULING",
+                task_states={"old": "PENDING"},
+                context={"goal": "old goal"},
+                task_graph=TG(
+                    goal="old goal",
+                    tasks=(
+                        TaskNode(
+                            id="old",
+                            task_type="primitive",
+                            action="list_directory",
+                            params={"path": "/"},
+                        ),
+                    ),
+                ),
+                timestamp=0.0,
+            )
+        )
+
+        graph = _single_task_graph("new goal")
+        _stub_decompose_goal(monkeypatch, graph)
+
+        ui = RecordingUI(confirm=True, resume_yes=False)
+        orch = _make_orchestrator(ui=ui, executor=_FixedGraphExecutor())
+        result = orch.run_goal("new goal")
+
+        assert result.final_state == "COMPLETED"
+        assert any(c[0] == "confirm_resume" for c in ui.calls)
+        assert any(c[0] == "confirm_plan" for c in ui.calls)
+
+
+class TestAuditLoggerInjection:
+    def test_audit_logger_attached_to_default_executor(self) -> None:
+        from strata.harness.executor import PrimitiveTaskExecutor
+
+        orch = _make_orchestrator()
+        assert isinstance(orch._executor, PrimitiveTaskExecutor)
+        assert orch._executor._audit_logger is orch._audit_logger
+
+
+class TestContextManagerWiring:
+    def test_context_window_contains_completed_task(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        graph = _single_task_graph()
+        _stub_decompose_goal(monkeypatch, graph)
+        orch = _make_orchestrator(executor=_FixedGraphExecutor())
+        orch.run_goal("list files")
+        window = list(orch._context.get_window())
+        assert any(entry.get("task_id") == "t1" for entry in window)
+        assert any(entry.get("success") is True for entry in window)
+
+    def test_failure_context_passed_to_adjuster(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify adjust_plan receives a failure_context that includes
+        recent_actions from the ContextManager window (E.4)."""
+        graph = _single_task_graph()
+        _stub_decompose_goal(monkeypatch, graph)
+
+        captured: list[Mapping[str, object]] = []
+
+        def _fake_adjust_plan(
+            graph: TaskGraph,
+            failed_task_id: str,
+            failure_context: Mapping[str, object],
+            router: object,
+        ) -> object:
+            captured.append(failure_context)
+            raise PlannerError("stop")
+
+        monkeypatch.setattr("strata.harness.orchestrator.adjust_plan", _fake_adjust_plan)
+
+        from strata.harness.recovery import RecoveryAction, RecoveryLevel
+
+        orch = _make_orchestrator(executor=_FailingExecutor(n_failures=99))
+        monkeypatch.setattr(
+            orch._recovery,
+            "attempt_recovery",
+            lambda task, error, count: RecoveryAction(
+                level=RecoveryLevel.REPLAN,
+                description="replan",
+                replacement_task=TaskNode(
+                    id="fallback",
+                    task_type="primitive",
+                    action="list_directory",
+                    params={"path": "/"},
+                ),
+            ),
+        )
+        orch.run_goal("list files")
+
+        # _splice_replan calls adjust_plan internally — at least one call
+        # must carry recent_actions and facts.
+        assert captured, "adjust_plan never invoked"
+        assert any("recent_actions" in c for c in captured)
 
 
 class TestUIInteractions:

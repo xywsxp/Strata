@@ -111,6 +111,27 @@ class CLI:
         self._print("")
 
     @icontract.ensure(lambda result: isinstance(result, bool), "must return bool")
+    def confirm_resume(self, saved_goal: str, task_count: int) -> bool:
+        """Ask the user whether to resume a previously saved checkpoint.
+
+        Gating:
+        * ``high`` — auto-answer ``yes`` (most-automated mode)
+        * ``medium`` / ``low`` / ``none`` — always ask so the user can inspect
+          stale state before committing to it.
+        """
+        self._print(
+            f"[Strata] Found saved checkpoint for goal: {saved_goal!r} ({task_count} task(s))."
+        )
+        if self.auto_confirm_level == "high":
+            self._print("[Strata] auto_confirm_level=high -> auto-resume")
+            return True
+        try:
+            answer = input("[Resume?] (y/n) > ").strip().lower()
+        except EOFError:
+            return False
+        return answer in ("y", "yes")
+
+    @icontract.ensure(lambda result: isinstance(result, bool), "must return bool")
     def confirm_plan(self) -> bool:
         """Ask user to confirm the plan, gated by ``auto_confirm_level``:
 

@@ -8,7 +8,9 @@ Topological pruning: extract_local_context for adjust_plan.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -17,6 +19,7 @@ from pathlib import Path
 import icontract
 
 from strata.core.config import MemoryConfig
+from strata.core.errors import ContextError
 from strata.core.types import TaskGraph, TaskNode
 from strata.grounding.filter import redact
 
@@ -133,11 +136,17 @@ class ContextManager:
 
 
 class AuditLogger:
-    """JSON Lines audit trail with sensitive-info redaction."""
+    """JSON Lines audit trail with sensitive-info redaction.
+
+    # CONVENTION: I/O 失败（磁盘满、权限、目录消失）不升格为 goal 失败 ——
+    # audit 层是观测面，观测不可用不应中断任务。由 __init__ 与 log() 两处
+    # 一起承担防御；任何 OSError 记一条 stderr warning 后吞掉。
+    """
 
     def __init__(self, log_path: str) -> None:
         self._log_path = log_path
-        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(OSError):
+            Path(log_path).parent.mkdir(parents=True, exist_ok=True)
 
     def log(
         self,
@@ -147,7 +156,11 @@ class AuditLogger:
         result: str,
         user_confirmed: bool = False,
     ) -> None:
-        """Append one JSON line to the audit log."""
+        """Append one JSON line to the audit log.
+
+        Any :class:`OSError` raised by the underlying file I/O is captured and
+        reported once via ``stderr``; the caller continues executing.
+        """
         entry = {
             "timestamp": time.time(),
             "task_id": redact(task_id),
@@ -157,8 +170,16 @@ class AuditLogger:
             "user_confirmed": user_confirmed,
         }
         line = json.dumps(entry, ensure_ascii=False) + "\n"
-        with open(self._log_path, "a", encoding="utf-8") as f:
-            f.write(line)
+        try:
+            with open(self._log_path, "a", encoding="utf-8") as f:
+                f.write(line)
+        except OSError as exc:
+            # CONVENTION: stderr warning 不引发异常；print 的 UnicodeError 再抑制。
+            with contextlib.suppress(Exception):
+                print(
+                    f"[strata.audit] failed to write audit log: {exc}",
+                    file=sys.stderr,
+                )
 
 
 # ── Topological pruning for adjust_plan ──
@@ -192,7 +213,7 @@ def extract_local_context(graph: TaskGraph, failed_task_id: str) -> LocalContext
     task_by_id: dict[str, TaskNode] = {t.id: t for t in graph.tasks}
 
     if failed_task_id not in task_by_id:
-        raise ValueError(f"task {failed_task_id} not in graph")
+        raise ContextError(f"task {failed_task_id!r} not in graph")
 
     failed_node = task_by_id[failed_task_id]
 
