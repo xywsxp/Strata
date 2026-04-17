@@ -17,6 +17,7 @@ Callers perceive failure via `try / except` (exception = single source of truth)
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import os
 import pty
@@ -46,9 +47,7 @@ class PTYTerminalAdapter:
         self._config = config
         self._sessions: dict[str, subprocess.Popen[bytes]] = {}
 
-    @icontract.require(
-        lambda command: len(command.strip()) > 0, "command must be non-empty"
-    )
+    @icontract.require(lambda command: len(command.strip()) > 0, "command must be non-empty")
     @icontract.require(lambda timeout: timeout > 0, "timeout must be positive")
     @icontract.require(
         lambda command: "sudo" not in command or "-n" in command,
@@ -105,14 +104,10 @@ class PTYTerminalAdapter:
         os.close(slave_fd)
 
         try:
-            stdout_full = self._collect_output(
-                proc, master_fd, token, timeout, silence_timeout
-            )
+            stdout_full = self._collect_output(proc, master_fd, token, timeout, silence_timeout)
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 os.close(master_fd)
-            except OSError:
-                pass
 
         returncode = self._extract_exit_code(stdout_full, token, proc.returncode or 0)
         stdout_clean = stdout_full.split(token)[0].rstrip("\n")
@@ -140,8 +135,7 @@ class PTYTerminalAdapter:
                 self._kill(proc)
                 self._drain_until_eof(master_fd, chunks)
                 raise CommandTimeoutError(
-                    f"command exceeded timeout={timeout}s after "
-                    f"{now - start:.2f}s"
+                    f"command exceeded timeout={timeout}s after {now - start:.2f}s"
                 )
             if silence_timeout and (now - last_output) > silence_timeout:
                 self._kill(proc)
@@ -257,7 +251,5 @@ class PTYTerminalAdapter:
         master_fd: int | None = getattr(proc, "_strata_master_fd", None)
         self._kill(proc)
         if master_fd is not None:
-            try:
+            with contextlib.suppress(OSError):
                 os.close(master_fd)
-            except OSError:
-                pass

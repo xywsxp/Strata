@@ -141,7 +141,7 @@ class TestKeyboardActions:
         adapter = _make_adapter(client)
         adapter.type_text("hello world")  # type: ignore[attr-defined]
         code = client.post_json.call_args.args[1]["code"]
-        assert "typewrite" in code
+        assert "_Kbd" in code or "Controller" in code
         assert "hello world" in code
 
     def test_type_text_uses_raw_string_literal(self) -> None:
@@ -155,7 +155,7 @@ class TestKeyboardActions:
         adapter = _make_adapter(client)
         adapter.type_text("printf '\\074br\\076'")  # type: ignore[attr-defined]
         code = client.post_json.call_args.args[1]["code"]
-        assert "typewrite(r'''" in code
+        assert "r'''" in code
         assert "\\074br\\076" in code
 
     def test_type_text_rejects_triple_quote(self) -> None:

@@ -10,9 +10,7 @@ from strata.core.types import AppInfo
 
 class MacOSAppManagerAdapter:
     def __init__(self) -> None:
-        raise UnsupportedPlatformError(
-            "macOS native app manager not implemented"
-        )
+        raise UnsupportedPlatformError("macOS native app manager not implemented")
 
     def launch_app(self, app_name: str, args: Sequence[str] | None = None) -> str:
         raise NotImplementedError("macOS support planned")

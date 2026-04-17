@@ -33,9 +33,7 @@ class LinuxSystemAdapter:
             if self._clip_cmd is not None:
                 self._is_xclip = "xclip" in self._clip_cmd
         if self._clip_cmd is None:
-            raise StrataEnvironmentError(
-                "clipboard tool not found: install xclip or xsel"
-            )
+            raise StrataEnvironmentError("clipboard tool not found: install xclip or xsel")
         return self._clip_cmd
 
     def get_clipboard_text(self) -> str:
@@ -67,8 +65,6 @@ class LinuxSystemAdapter:
     def get_cwd(self) -> str:
         return os.getcwd()
 
-    @icontract.require(
-        lambda path: os.path.isdir(path), "path must be an existing directory"
-    )
+    @icontract.require(lambda path: os.path.isdir(path), "path must be an existing directory")
     def set_cwd(self, path: str) -> None:
         os.chdir(path)

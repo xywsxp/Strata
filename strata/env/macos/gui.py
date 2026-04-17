@@ -13,8 +13,7 @@ from strata.core.types import ScreenRegion
 class MacOSGUIAdapter:
     def __init__(self) -> None:
         raise UnsupportedPlatformError(
-            "macOS native GUI not implemented; "
-            "use OSWorldGUIAdapter or set osworld.enabled=true"
+            "macOS native GUI not implemented; use OSWorldGUIAdapter or set osworld.enabled=true"
         )
 
     def click(self, x: float, y: float, button: str = "left") -> None:

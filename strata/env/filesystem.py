@@ -32,10 +32,9 @@ class SandboxedFileSystemAdapter:
         return Path(checked).read_text(encoding="utf-8")
 
     @icontract.ensure(
-        lambda path, content: Path(
-            os.path.realpath(os.path.expanduser(path))
-        ).read_text()
-        == content,
+        lambda path, content: (
+            Path(os.path.realpath(os.path.expanduser(path))).read_text() == content
+        ),
         "written content must match",
     )
     def write_file(self, path: str, content: str, encoding: str = "utf-8") -> None:
@@ -43,9 +42,7 @@ class SandboxedFileSystemAdapter:
         Path(checked).parent.mkdir(parents=True, exist_ok=True)
         Path(checked).write_text(content, encoding=encoding)
 
-    def list_directory(
-        self, path: str, pattern: str | None = None
-    ) -> Sequence[FileInfo]:
+    def list_directory(self, path: str, pattern: str | None = None) -> Sequence[FileInfo]:
         checked = self._guard.check_path(path, write=False)
         p = Path(checked)
         entries = list(p.glob(pattern)) if pattern else list(p.iterdir())
@@ -78,9 +75,7 @@ class SandboxedFileSystemAdapter:
         meta = json.loads(sidecar.read_text())
         original = meta.get("original_path")
         if not isinstance(original, str) or not original.strip():
-            raise SandboxViolationError(
-                f"sidecar original_path missing or invalid in {sidecar}"
-            )
+            raise SandboxViolationError(f"sidecar original_path missing or invalid in {sidecar}")
         original_checked = self._guard.check_path(original, write=True)
         tp.rename(original_checked)
         sidecar.unlink()
@@ -97,9 +92,7 @@ class SandboxedFileSystemAdapter:
         trash_root = os.path.realpath(self._trash_dir)
         if resolved == trash_root or resolved.startswith(trash_root + os.sep):
             return resolved
-        raise SandboxViolationError(
-            f"trash path {resolved} is outside trash dir {trash_root}"
-        )
+        raise SandboxViolationError(f"trash path {resolved} is outside trash dir {trash_root}")
 
     def get_file_info(self, path: str) -> FileInfo:
         checked = self._guard.check_path(path, write=False)

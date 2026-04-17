@@ -47,9 +47,7 @@ class OSWorldHTTPClient:
         try:
             parsed = _json.loads(body)
         except _json.JSONDecodeError as exc:
-            raise OSWorldConnectionError(
-                f"POST {path} returned non-JSON body: {exc}"
-            ) from exc
+            raise OSWorldConnectionError(f"POST {path} returned non-JSON body: {exc}") from exc
         if not isinstance(parsed, dict):
             raise OSWorldConnectionError(
                 f"POST {path} returned non-object JSON: {type(parsed).__name__}"

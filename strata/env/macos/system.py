@@ -7,9 +7,7 @@ from strata.core.errors import UnsupportedPlatformError
 
 class MacOSSystemAdapter:
     def __init__(self) -> None:
-        raise UnsupportedPlatformError(
-            "macOS native system adapter not implemented"
-        )
+        raise UnsupportedPlatformError("macOS native system adapter not implemented")
 
     def get_clipboard_text(self) -> str:
         raise NotImplementedError("macOS support planned")

@@ -61,8 +61,7 @@ class OSWorldGUIAdapter:
 
         if (actual_w, actual_h) != config.screen_size:
             raise ConfigError(
-                f"screen size mismatch: expected {config.screen_size}, "
-                f"got ({actual_w}, {actual_h})"
+                f"screen size mismatch: expected {config.screen_size}, got ({actual_w}, {actual_h})"
             )
 
     # ── Mouse / keyboard (via pyautogui over /run_python) ──
@@ -71,19 +70,14 @@ class OSWorldGUIAdapter:
         if button not in ("left", "right", "middle"):
             raise ValueError(f"invalid mouse button: {button!r}")
         self._run_python(
-            f"import pyautogui; pyautogui.click(x={float(x)}, y={float(y)}, "
-            f"button='{button}')"
+            f"import pyautogui; pyautogui.click(x={float(x)}, y={float(y)}, button='{button}')"
         )
 
     def double_click(self, x: float, y: float) -> None:
-        self._run_python(
-            f"import pyautogui; pyautogui.doubleClick(x={float(x)}, y={float(y)})"
-        )
+        self._run_python(f"import pyautogui; pyautogui.doubleClick(x={float(x)}, y={float(y)})")
 
     def move_mouse(self, x: float, y: float) -> None:
-        self._run_python(
-            f"import pyautogui; pyautogui.moveTo(x={float(x)}, y={float(y)})"
-        )
+        self._run_python(f"import pyautogui; pyautogui.moveTo(x={float(x)}, y={float(y)})")
 
     def type_text(self, text: str, interval: float = 0.05) -> None:
         # CONVENTION: pynput.keyboard.Controller.type() 替代 pyautogui.typewrite()。
@@ -119,14 +113,10 @@ class OSWorldGUIAdapter:
         neither, so we map delta_y>0 → "down" by negating.
         """
         if delta_y != 0:
-            clicks = -int(delta_y // 100) if abs(delta_y) >= 100 else (
-                -1 if delta_y > 0 else 1
-            )
+            clicks = -int(delta_y // 100) if abs(delta_y) >= 100 else (-1 if delta_y > 0 else 1)
             self._run_python(f"import pyautogui; pyautogui.scroll({clicks})")
         if delta_x != 0:
-            clicks = int(delta_x // 100) if abs(delta_x) >= 100 else (
-                1 if delta_x > 0 else -1
-            )
+            clicks = int(delta_x // 100) if abs(delta_x) >= 100 else (1 if delta_x > 0 else -1)
             self._run_python(f"import pyautogui; pyautogui.hscroll({clicks})")
 
     # ── Screen ──
@@ -155,9 +145,7 @@ class OSWorldGUIAdapter:
         width = resp.get("width")
         height = resp.get("height")
         if not isinstance(width, int) or not isinstance(height, int):
-            raise OSWorldConnectionError(
-                f"/screen_size returned unexpected payload: {resp!r}"
-            )
+            raise OSWorldConnectionError(f"/screen_size returned unexpected payload: {resp!r}")
         return (width, height)
 
     def _run_python(self, code: str) -> None:
@@ -165,8 +153,7 @@ class OSWorldGUIAdapter:
         status = resp.get("status")
         if status != "success":
             raise OSWorldConnectionError(
-                f"/run_python failed: status={status!r}, "
-                f"message={resp.get('message')!r}"
+                f"/run_python failed: status={status!r}, message={resp.get('message')!r}"
             )
 
     def _crop_png(self, data: bytes, region: ScreenRegion) -> bytes:
@@ -174,8 +161,7 @@ class OSWorldGUIAdapter:
             from PIL import Image
         except ImportError as exc:
             raise OSWorldConnectionError(
-                "Pillow is required for regional capture_screen; "
-                "run: uv add pillow"
+                "Pillow is required for regional capture_screen; run: uv add pillow"
             ) from exc
 
         img = Image.open(io.BytesIO(data))
@@ -188,5 +174,3 @@ class OSWorldGUIAdapter:
         buf = io.BytesIO()
         cropped.save(buf, format="PNG")
         return buf.getvalue()
-
-
