@@ -122,7 +122,9 @@ def main(goals: list[str]) -> int:
     for s in statuses:
         mark = "+" if s.ok else "!"
         print(f"[{mark}] {s.component}: {s.detail} ({s.latency_ms:.0f}ms)")
-    require_healthy(statuses)
+    used_providers = {getattr(cfg.roles, r) for r in ("planner", "grounding", "vision", "search")}
+    required = [f"llm/{p}" for p in used_providers] + (["osworld"] if cfg.osworld.enabled else [])
+    require_healthy(statuses, required_components=required)
 
     print(f"[+] planner -> {cfg.roles.planner}  (model={cfg.providers[cfg.roles.planner].model})")
     print(f"[+] vision  -> {cfg.roles.vision}  (model={cfg.providers[cfg.roles.vision].model})")

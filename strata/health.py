@@ -39,19 +39,32 @@ class HealthStatus:
 def check_llm_providers(config: StrataConfig) -> Sequence[HealthStatus]:
     """Ping each configured LLM provider with a minimal chat call."""
     statuses: list[HealthStatus] = []
-    ping_msg = ChatMessage(role="user", content="ping")
+    ping_msg = ChatMessage(role="user", content="Reply with exactly: OK")
 
     for name, prov_config in config.providers.items():
         t0 = time.monotonic()
         try:
             provider = OpenAICompatProvider(prov_config)
-            provider.chat([ping_msg], temperature=0.0, max_tokens=1)
+            provider.chat([ping_msg], temperature=0.0, max_tokens=50)
             latency = (time.monotonic() - t0) * 1000
             statuses.append(
                 HealthStatus(
                     component=f"llm/{name} ({prov_config.model})",
                     ok=True,
                     detail="ok",
+                    latency_ms=latency,
+                )
+            )
+        except icontract.ViolationError:
+            # CONVENTION: reasoning models (e.g. deepseek-reasoner) may return
+            # empty content because all tokens went to the reasoning chain.
+            # A successful API roundtrip is sufficient proof of connectivity.
+            latency = (time.monotonic() - t0) * 1000
+            statuses.append(
+                HealthStatus(
+                    component=f"llm/{name} ({prov_config.model})",
+                    ok=True,
+                    detail="ok (reasoning model, empty content expected)",
                     latency_ms=latency,
                 )
             )
@@ -113,11 +126,28 @@ def check_all(config: StrataConfig) -> Sequence[HealthStatus]:
     return tuple(statuses)
 
 
-def require_healthy(statuses: Sequence[HealthStatus]) -> None:
-    """Exit the process if any health check failed."""
+def require_healthy(
+    statuses: Sequence[HealthStatus],
+    required_components: Sequence[str] | None = None,
+) -> None:
+    """Exit the process if any required health check failed.
+
+    When ``required_components`` is given, only those component names (substring
+    match) trigger a hard exit. Unused providers failing is a warning, not fatal.
+    """
     failed = [s for s in statuses if not s.ok]
     if not failed:
         return
+
+    if required_components is not None:
+        critical = [s for s in failed if any(rc in s.component for rc in required_components)]
+        warnings = [s for s in failed if s not in critical]
+        for s in warnings:
+            print(f"[Strata] Warning: {s.component} unhealthy: {s.detail}", file=sys.stderr)
+        if not critical:
+            return
+        failed = critical
+
     print("[Strata] Health check failed:", file=sys.stderr)
     for s in failed:
         print(f"  [{s.component}] {s.detail}", file=sys.stderr)

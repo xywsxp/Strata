@@ -51,7 +51,13 @@ def main() -> None:
     for s in statuses:
         mark = "+" if s.ok else "!"
         print(f"[{mark}] {s.component}: {s.detail} ({s.latency_ms:.0f}ms)")
-    require_healthy(statuses)
+    used_providers = {
+        getattr(config.roles, r) for r in ("planner", "grounding", "vision", "search")
+    }
+    required = [f"llm/{p}" for p in used_providers] + (
+        ["osworld"] if config.osworld.enabled else []
+    )
+    require_healthy(statuses, required_components=required)
 
     try:
         bundle = EnvironmentFactory.create(config)
