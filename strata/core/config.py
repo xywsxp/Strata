@@ -10,10 +10,11 @@ import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import icontract
 
+from strata.core._validators import VALID_AUTO_CONFIRM, VALID_OSWORLD_PROVIDERS, validate_literal
 from strata.core.errors import ConfigError
 from strata.core.paths import PathsConfig
 
@@ -236,7 +237,15 @@ def _parse_osworld(raw: object) -> OSWorldConfig:
     docker_img = section.get("docker_image")
     return OSWorldConfig(
         enabled=bool(section.get("enabled", False)),
-        provider=str(section.get("provider", "docker")),  # type: ignore[arg-type]
+        provider=cast(
+            Literal["vmware", "virtualbox", "docker"],
+            validate_literal(
+                str(section.get("provider", "docker")),
+                VALID_OSWORLD_PROVIDERS,
+                "osworld.provider",
+                config_error=True,
+            ),
+        ),
         os_type=str(section.get("os_type", "Ubuntu")),
         screen_size=(int(screen_list[0]), int(screen_list[1])),
         headless=bool(section.get("headless", True)),
@@ -305,7 +314,15 @@ def load_config(path: str | None = None) -> StrataConfig:
         paths=paths,
         max_loop_iterations=int(data.get("max_loop_iterations", 50)),
         dangerous_patterns=dangerous,
-        auto_confirm_level=str(data.get("auto_confirm_level", "low")),  # type: ignore[arg-type]
+        auto_confirm_level=cast(
+            Literal["none", "low", "medium", "high"],
+            validate_literal(
+                str(data.get("auto_confirm_level", "low")),
+                VALID_AUTO_CONFIRM,
+                "auto_confirm_level",
+                config_error=True,
+            ),
+        ),
     )
 
 

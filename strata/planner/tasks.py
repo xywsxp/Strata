@@ -12,7 +12,7 @@ import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import icontract
 
@@ -127,7 +127,7 @@ def _parse_setup(raw: object, path: Path) -> SetupSpec | None:
     commands = tuple(str(c) for c in raw.get("commands", ()))
     if not commands:
         return None
-    return SetupSpec(target=target, commands=commands)  # type: ignore[arg-type]
+    return SetupSpec(target=cast(Literal["host", "osworld"], target), commands=commands)
 
 
 def _parse_verify(raw: object, path: Path) -> VerifySpec | None:
@@ -144,7 +144,7 @@ def _parse_verify(raw: object, path: Path) -> VerifySpec | None:
     if regex is None and exit_code is None:
         raise TaskFileError(f"{path}: verify must have expected_stdout_regex or expected_exit_code")
     return VerifySpec(
-        target=target,  # type: ignore[arg-type]
+        target=cast(Literal["host", "osworld"], target),
         command=command,
         expected_stdout_regex=str(regex) if regex is not None else None,
         expected_exit_code=int(exit_code) if exit_code is not None else None,

@@ -8,8 +8,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, cast
 
+from strata.core._validators import VALID_TASK_TYPES, validate_literal
 from strata.core.errors import SerializationError
 
 # ── Type aliases ──
@@ -183,7 +184,10 @@ def task_node_from_dict(data: Mapping[str, object]) -> TaskNode:
 
         return TaskNode(
             id=str(data["id"]),
-            task_type=str(data["task_type"]),  # type: ignore[arg-type]
+            task_type=cast(
+                Literal["primitive", "compound", "repeat", "if_then", "for_each"],
+                validate_literal(str(data["task_type"]), VALID_TASK_TYPES, "task_type"),
+            ),
             action=str(data["action"]) if data.get("action") is not None else None,
             params=params,
             method=str(data["method"]) if data.get("method") is not None else None,

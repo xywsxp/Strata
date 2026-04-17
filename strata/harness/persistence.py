@@ -9,9 +9,11 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import icontract
 
+from strata.core._validators import VALID_GLOBAL_STATES, VALID_TASK_STATES, validate_literal
 from strata.core.errors import PersistenceSchemaVersionError, SerializationError
 from strata.core.types import (
     GlobalState,
@@ -107,7 +109,10 @@ def _checkpoint_from_dict(d: Mapping[str, object]) -> Checkpoint:
     task_states: dict[str, TaskState] = {}
     if isinstance(task_states_raw, dict):
         for k, v in task_states_raw.items():
-            task_states[str(k)] = str(v)  # type: ignore[assignment]
+            task_states[str(k)] = cast(
+                TaskState,
+                validate_literal(str(v), VALID_TASK_STATES, "task_state", fallback="PENDING"),
+            )
 
     ctx_raw = d.get("context", {})
     context = dict(ctx_raw) if isinstance(ctx_raw, dict) else {}
@@ -123,11 +128,21 @@ def _checkpoint_from_dict(d: Mapping[str, object]) -> Checkpoint:
         raise SerializationError(f"failed to deserialize task_graph: {e}") from e
 
     return Checkpoint(
-        global_state=str(d.get("global_state", "INIT")),  # type: ignore[arg-type]
+        global_state=cast(
+            GlobalState,
+            validate_literal(
+                str(d.get("global_state", "INIT")),
+                VALID_GLOBAL_STATES,
+                "global_state",
+                fallback="INIT",
+            ),
+        ),
         task_states=task_states,
         context=context,
         task_graph=task_graph,
-        timestamp=float(d.get("timestamp", 0.0)),  # type: ignore[arg-type]
+        timestamp=(
+            float(ts_raw) if isinstance((ts_raw := d.get("timestamp")), (int, float)) else 0.0
+        ),
         schema_version=version_raw,
     )
 

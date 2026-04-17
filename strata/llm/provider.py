@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import icontract
 import openai
@@ -145,19 +145,20 @@ class OpenAICompatProvider:
         """Send a chat completion request to the provider."""
         openai_messages = [_message_to_openai(m) for m in messages]
 
-        response_format = {"type": "json_object"} if json_mode else openai.NOT_GIVEN
+        # CONVENTION: cast() — we build messages as plain dicts from
+        # ChatMessage; the openai SDK accepts them at runtime but its type
+        # stubs demand vendor-specific TypedDicts we intentionally avoid.
+        kwargs: dict[str, Any] = {  # CONVENTION: Any — openai SDK boundary
+            "model": self._model,
+            "messages": openai_messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
 
         try:
-            # CONVENTION: type: ignore — we build messages as plain dicts from
-            # ChatMessage; the openai SDK accepts them at runtime but its type
-            # stubs demand vendor-specific TypedDicts we intentionally avoid.
-            response = self._client.chat.completions.create(  # type: ignore[call-overload]
-                model=self._model,
-                messages=openai_messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                response_format=response_format,
-            )
+            response = self._client.chat.completions.create(**kwargs)
         except openai.APIError as exc:
             raise _classify_openai_error(exc) from exc
         except Exception as exc:

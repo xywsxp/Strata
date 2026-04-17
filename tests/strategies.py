@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import tempfile
 from collections.abc import Mapping, Sequence
+from typing import Literal, cast
 
 import hypothesis.strategies as st
 from hypothesis.strategies import SearchStrategy
@@ -51,7 +52,7 @@ def st_task_node(
 
     return TaskNode(
         id=node_id,
-        task_type=tt,  # type: ignore[arg-type]
+        task_type=cast(Literal["primitive", "compound", "repeat", "if_then", "for_each"], tt),
         action=action,
         params=params,
         method=method,

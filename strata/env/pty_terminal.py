@@ -27,12 +27,21 @@ import subprocess
 import time
 import uuid
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 import icontract
 
 from strata.core.config import TerminalConfig
 from strata.core.errors import CommandTimeoutError, SilenceTimeoutError
 from strata.core.types import CommandResult
+
+
+@dataclass
+class _PTYSession:
+    """Typed container for a PTY-backed shell session (replaces monkey-patching)."""
+
+    proc: subprocess.Popen[bytes]
+    master_fd: int
 
 
 class PTYTerminalAdapter:
@@ -45,7 +54,7 @@ class PTYTerminalAdapter:
 
     def __init__(self, config: TerminalConfig) -> None:
         self._config = config
-        self._sessions: dict[str, subprocess.Popen[bytes]] = {}
+        self._sessions: dict[str, _PTYSession] = {}
 
     @icontract.require(lambda command: len(command.strip()) > 0, "command must be non-empty")
     @icontract.require(lambda timeout: timeout > 0, "timeout must be positive")
@@ -224,32 +233,27 @@ class PTYTerminalAdapter:
         )
         os.close(slave_fd)
         os.set_blocking(master_fd, False)
-        proc._strata_master_fd = master_fd  # type: ignore[attr-defined]
-        self._sessions[session_id] = proc
+        self._sessions[session_id] = _PTYSession(proc=proc, master_fd=master_fd)
         return session_id
 
     def send_to_terminal(self, session_id: str, text: str) -> None:
-        proc = self._sessions[session_id]
-        master_fd: int = proc._strata_master_fd  # type: ignore[attr-defined]
-        os.write(master_fd, (text + "\n").encode("utf-8"))
+        session = self._sessions[session_id]
+        os.write(session.master_fd, (text + "\n").encode("utf-8"))
 
     def read_terminal_output(self, session_id: str, timeout: float = 1.0) -> str:
-        proc = self._sessions[session_id]
-        master_fd: int = proc._strata_master_fd  # type: ignore[attr-defined]
-        ready, _, _ = select.select([master_fd], [], [], timeout)
+        session = self._sessions[session_id]
+        ready, _, _ = select.select([session.master_fd], [], [], timeout)
         if not ready:
             return ""
         try:
-            return os.read(master_fd, 8192).decode("utf-8", errors="replace")
+            return os.read(session.master_fd, 8192).decode("utf-8", errors="replace")
         except OSError:
             return ""
 
     def close_terminal(self, session_id: str) -> None:
-        proc = self._sessions.pop(session_id, None)
-        if proc is None:
+        session = self._sessions.pop(session_id, None)
+        if session is None:
             return
-        master_fd: int | None = getattr(proc, "_strata_master_fd", None)
-        self._kill(proc)
-        if master_fd is not None:
-            with contextlib.suppress(OSError):
-                os.close(master_fd)
+        self._kill(session.proc)
+        with contextlib.suppress(OSError):
+            os.close(session.master_fd)

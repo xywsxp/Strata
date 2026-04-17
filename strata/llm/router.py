@@ -64,12 +64,19 @@ class LLMRouter:
         self,
         role: LLMRole,
         messages: Sequence[ChatMessage],
-        **kwargs: object,
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
     ) -> ChatResponse:
         """Central dispatch: call provider, record to sink, re-raise on error."""
         provider = self.get_provider(role)
         try:
-            response = provider.chat(messages, **kwargs)  # type: ignore[arg-type]
+            response = provider.chat(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                json_mode=json_mode,
+            )
         except Exception as exc:
             self._sink.record(role, messages, None, exc)
             raise
@@ -79,31 +86,51 @@ class LLMRouter:
     def plan(
         self,
         messages: Sequence[ChatMessage],
-        **kwargs: object,
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
     ) -> ChatResponse:
         """Convenience: dispatch to the planner role provider."""
-        return self._dispatch("planner", messages, **kwargs)
+        return self._dispatch(
+            "planner", messages, temperature=temperature, max_tokens=max_tokens, json_mode=json_mode
+        )
 
     def ground(
         self,
         messages: Sequence[ChatMessage],
-        **kwargs: object,
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
     ) -> ChatResponse:
         """Convenience: dispatch to the grounding role provider."""
-        return self._dispatch("grounding", messages, **kwargs)
+        return self._dispatch(
+            "grounding",
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            json_mode=json_mode,
+        )
 
     def see(
         self,
         messages: Sequence[ChatMessage],
-        **kwargs: object,
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
     ) -> ChatResponse:
         """Convenience: dispatch to the vision role provider."""
-        return self._dispatch("vision", messages, **kwargs)
+        return self._dispatch(
+            "vision", messages, temperature=temperature, max_tokens=max_tokens, json_mode=json_mode
+        )
 
     def search(
         self,
         messages: Sequence[ChatMessage],
-        **kwargs: object,
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
     ) -> ChatResponse:
         """Convenience: dispatch to the search role provider."""
-        return self._dispatch("search", messages, **kwargs)
+        return self._dispatch(
+            "search", messages, temperature=temperature, max_tokens=max_tokens, json_mode=json_mode
+        )
