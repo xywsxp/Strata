@@ -3,6 +3,10 @@
 Each role (planner, grounding, vision, search) is resolved to a concrete
 OpenAICompatProvider based on StrataConfig.  Provider instances are cached
 to avoid redundant client construction.
+
+An optional :class:`ChatTranscriptSink` is called after every provider
+``chat()`` call (success or failure) so that prompts, images, and responses
+are persisted for offline debugging.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from strata.core.config import StrataConfig
 from strata.core.errors import ConfigError
 from strata.core.types import LLMRole
 from strata.llm.provider import ChatMessage, ChatResponse, LLMProvider, OpenAICompatProvider
+from strata.observability.transcript import ChatTranscriptSink, NullTranscriptSink
 
 
 class LLMRouter:
@@ -27,9 +32,14 @@ class LLMRouter:
         ),
         "all role references must exist in providers",
     )
-    def __init__(self, config: StrataConfig) -> None:
+    def __init__(
+        self,
+        config: StrataConfig,
+        sink: ChatTranscriptSink | None = None,
+    ) -> None:
         self._config = config
         self._cache: dict[str, OpenAICompatProvider] = {}
+        self._sink: ChatTranscriptSink = sink if sink is not None else NullTranscriptSink()
 
         for role_name in ("planner", "grounding", "vision", "search"):
             provider_name: str = getattr(config.roles, role_name)
@@ -50,14 +60,29 @@ class LLMRouter:
         provider_name: str = getattr(self._config.roles, role)
         return self._cache[provider_name]
 
+    def _dispatch(
+        self,
+        role: LLMRole,
+        messages: Sequence[ChatMessage],
+        **kwargs: object,
+    ) -> ChatResponse:
+        """Central dispatch: call provider, record to sink, re-raise on error."""
+        provider = self.get_provider(role)
+        try:
+            response = provider.chat(messages, **kwargs)  # type: ignore[arg-type]
+        except Exception as exc:
+            self._sink.record(role, messages, None, exc)
+            raise
+        self._sink.record(role, messages, response, None)
+        return response
+
     def plan(
         self,
         messages: Sequence[ChatMessage],
         **kwargs: object,
     ) -> ChatResponse:
         """Convenience: dispatch to the planner role provider."""
-        provider = self.get_provider("planner")
-        return provider.chat(messages, **kwargs)  # type: ignore[arg-type]
+        return self._dispatch("planner", messages, **kwargs)
 
     def ground(
         self,
@@ -65,8 +90,7 @@ class LLMRouter:
         **kwargs: object,
     ) -> ChatResponse:
         """Convenience: dispatch to the grounding role provider."""
-        provider = self.get_provider("grounding")
-        return provider.chat(messages, **kwargs)  # type: ignore[arg-type]
+        return self._dispatch("grounding", messages, **kwargs)
 
     def see(
         self,
@@ -74,8 +98,7 @@ class LLMRouter:
         **kwargs: object,
     ) -> ChatResponse:
         """Convenience: dispatch to the vision role provider."""
-        provider = self.get_provider("vision")
-        return provider.chat(messages, **kwargs)  # type: ignore[arg-type]
+        return self._dispatch("vision", messages, **kwargs)
 
     def search(
         self,
@@ -83,5 +106,4 @@ class LLMRouter:
         **kwargs: object,
     ) -> ChatResponse:
         """Convenience: dispatch to the search role provider."""
-        provider = self.get_provider("search")
-        return provider.chat(messages, **kwargs)  # type: ignore[arg-type]
+        return self._dispatch("search", messages, **kwargs)

@@ -55,6 +55,12 @@ from strata.harness.state_machine import (
     create_global_state_machine,
 )
 from strata.llm.router import LLMRouter
+from strata.observability.recorder import (
+    NullRecorder,
+    OSWorldFFmpegRecorder,
+    TrajectoryRecorder,
+)
+from strata.observability.transcript import ChatTranscriptSink
 from strata.paths import RunDirLayout, gc_old_runs
 from strata.planner.adjuster import Adjustment, adjust_plan, apply_adjustment
 from strata.planner.htn import decompose_goal
@@ -116,17 +122,23 @@ class AgentOrchestrator:
         llm_router: LLMRouter | None = None,
         executor: TaskExecutor | None = None,
         layout: RunDirLayout | None = None,
+        transcript_sink: ChatTranscriptSink | None = None,
+        recorder: TrajectoryRecorder | None = None,
     ) -> None:
         self._config = config
         self._bundle = bundle
         self._ui = ui
         self._layout = layout
+        self._transcript_sink = transcript_sink
+        self._recorder = recorder
         # CONVENTION: llm_router 可选注入 —— 生产路径由 __main__ 构造一次；
         # 测试可传 mock 免去 OpenAI 客户端构造的网络依赖。
-        self._llm_router = llm_router if llm_router is not None else LLMRouter(config)
+        self._llm_router = (
+            llm_router
+            if llm_router is not None
+            else LLMRouter(config, sink=transcript_sink)
+        )
         self._context = ContextManager(config.memory)
-        # CONVENTION: STRATA_STATE_DIR 环境变量仍保留作为测试隔离后门，
-        # 但生产路径优先使用 layout.checkpoint_dir（来自 config.paths）。
         state_dir = _default_state_dir()
         self._audit_logger = AuditLogger(config.audit_log)
         self._persistence = PersistenceManager(state_dir)
@@ -184,7 +196,12 @@ class AgentOrchestrator:
         task_states: dict[str, TaskState] = {}
 
         run_layout = self._prepare_run_layout(goal)
+        active_recorder = self._build_recorder(run_layout)
         started_at = time.time()
+
+        run_id = run_layout.run_dir.name if run_layout else "unknown"
+        with contextlib.suppress(Exception):
+            active_recorder.start(run_id)
 
         try:
             resumed = self._try_resume()
@@ -236,6 +253,9 @@ class AgentOrchestrator:
                 graph=self._last_graph,
             )
 
+        with contextlib.suppress(Exception):
+            active_recorder.note_event("run_end", {"final_state": final})
+            active_recorder.stop()
         self._finalize_run(run_layout, goal, started_at, final)
         return result
 
@@ -259,6 +279,24 @@ class AgentOrchestrator:
             return layout
         except Exception:
             return None
+
+    def _build_recorder(self, layout: RunDirLayout | None) -> TrajectoryRecorder:
+        """Return the active recorder for this run.
+
+        Priority: injected > auto-constructed (if OSWorld enabled) > NullRecorder.
+        """
+        if self._recorder is not None:
+            return self._recorder
+        if layout is not None and self._config.osworld.enabled:
+            try:
+                return OSWorldFFmpegRecorder(
+                    self._config.osworld,
+                    layout.recordings_dir,
+                    fps=30,
+                )
+            except Exception:
+                pass
+        return NullRecorder()
 
     def _finalize_run(
         self,
