@@ -30,6 +30,8 @@ from typing import Literal
 from strata.core.config import load_config
 from strata.env.factory import EnvironmentFactory
 from strata.harness.orchestrator import AgentOrchestrator, ExecutionResult
+from strata.observability.transcript import FileChatTranscriptSink
+from strata.paths import RunDirLayout
 from strata.tasks import TaskFile, TaskFileError
 
 # ── Auto-confirming UI (reused from agent_e2e.py pattern) ──
@@ -116,8 +118,9 @@ def _run_shell_osworld(command: str, server_url: str, timeout: float) -> ShellRe
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = _json.loads(resp.read())
         output = str(body.get("output", ""))
+        error = str(body.get("error", ""))
         rc = int(body.get("returncode", body.get("exit_code", 0)))
-        return ShellResult(stdout=output, stderr="", returncode=rc)
+        return ShellResult(stdout=output, stderr=error, returncode=rc)
     except urllib.error.URLError as exc:
         return ShellResult(stdout="", stderr=f"OSWorld connection error: {exc}", returncode=-1)
     except Exception as exc:
@@ -165,12 +168,17 @@ def _run_single(
     cfg = load_config(config_path)
     bundle = EnvironmentFactory.create(cfg)
     ui = _AutoUI()
-    orch = AgentOrchestrator(config=cfg, bundle=bundle, ui=ui)
+    layout = RunDirLayout.create(cfg.paths, task.goal)
+    layout.ensure_dirs()
+    transcript = FileChatTranscriptSink(layout.llm_dir)
+    orch = AgentOrchestrator(
+        config=cfg, bundle=bundle, ui=ui, layout=layout, transcript_sink=transcript
+    )
 
     t0 = time.monotonic()
     setup_out: str | None = None
     verify_out: str | None = None
-    run_dir = ""
+    run_dir = str(layout.run_dir)
 
     server_url = cfg.osworld.server_url if cfg.osworld.enabled else ""
 
@@ -283,6 +291,8 @@ def _write_report(reports: list[TaskReport], report_dir: Path) -> Path:
                 "verdict": r.verdict,
                 "duration_s": round(r.duration_s, 2),
                 "run_dir": r.run_dir,
+                "setup_output": r.setup_output,
+                "verify_output": r.verify_output,
                 "error": r.error,
             }
             for r in reports
@@ -366,7 +376,10 @@ def main(argv: list[str] | None = None) -> int:
         reports.append(report)
         mark = "✓" if report.verdict == "PASS" else "✗"
         suffix = f"  ({report.error})" if report.error else ""
-        print(f"  {mark} {report.verdict} in {report.duration_s:.1f}s{suffix}\n")
+        print(f"  {mark} {report.verdict} in {report.duration_s:.1f}s{suffix}")
+        if report.run_dir:
+            print(f"  📁 {report.run_dir}")
+        print()
 
     report_path = _write_report(reports, Path(args.report_dir))
     print(f"Report written to {report_path}")

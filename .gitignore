@@ -134,15 +134,15 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
-# Environments
+# Environments (root-only — do not use bare ``env/`` or it ignores ``strata/env/``)
 .env
 .envrc
 .venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+/env/
+/venv/
+/ENV/
+/env.bak/
+/venv.bak/
 
 # Spyder project settings
 .spyderproject
@@ -210,3 +210,7 @@ config.toml
 # Strata runtime artifacts
 .strata-run/
 reports/
+
+# User preference: do not track markdown or lockfiles in this repo
+*.md
+*.lock

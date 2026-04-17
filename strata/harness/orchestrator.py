@@ -193,12 +193,12 @@ class AgentOrchestrator:
         task_states: dict[str, TaskState] = {}
 
         run_layout = self._prepare_run_layout(goal)
-        active_recorder = self._build_recorder(run_layout)
+        self._active_recorder = self._build_recorder(run_layout)
         started_at = time.time()
 
         run_id = run_layout.run_dir.name if run_layout else "unknown"
         with contextlib.suppress(Exception):
-            active_recorder.start(run_id)
+            self._active_recorder.start(run_id)
 
         try:
             resumed = self._try_resume()
@@ -251,8 +251,8 @@ class AgentOrchestrator:
             )
 
         with contextlib.suppress(Exception):
-            active_recorder.note_event("run_end", {"final_state": final})
-            active_recorder.stop()
+            self._active_recorder.note_event("run_end", {"final_state": final})
+            self._active_recorder.stop()
         self._finalize_run(run_layout, goal, started_at, final)
         return result
 
@@ -401,7 +401,16 @@ class AgentOrchestrator:
             task_states[task.id] = "RUNNING"
             self._ui.display_progress(task.id, "RUNNING")
 
+            with contextlib.suppress(Exception):
+                self._active_recorder.note_keyframe(f"{task.id}_before")
+                self._active_recorder.note_event(
+                    "task_start", {"task_id": task.id, "action": task.action or task.task_type}
+                )
+
             result = self._run_single(task, context)
+
+            with contextlib.suppress(Exception):
+                self._active_recorder.note_keyframe(f"{task.id}_after")
 
             if result.success:
                 task_states[task.id] = "SUCCEEDED"
@@ -409,6 +418,11 @@ class AgentOrchestrator:
                 self._ui.display_progress(task.id, "SUCCEEDED")
                 if task.output_var and result.data:
                     context[task.output_var] = result.data
+                with contextlib.suppress(Exception):
+                    self._active_recorder.note_event(
+                        "task_done",
+                        {"task_id": task.id, "success": True},
+                    )
                 self._context.add_entry(
                     {
                         "task_id": task.id,

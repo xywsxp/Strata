@@ -4,11 +4,14 @@ goal = "Create a file at /tmp/strata_e2e_hello.txt containing the single word: h
 tags = ["filesystem", "smoke"]
 timeout_s = 120
 
+# CONVENTION: agent 的 execute_command 通过 PTYTerminalAdapter 在宿主机执行，
+# 因此 setup/verify 也在宿主机上检查。如果 agent 改为通过 GUI 打开容器内终端
+# 执行命令，则需要把 target 改回 "osworld"。
 [setup]
-target = "osworld"
+target = "host"
 commands = ["rm -f /tmp/strata_e2e_hello.txt"]
 
 [verify]
-target = "osworld"
+target = "host"
 command = "cat /tmp/strata_e2e_hello.txt"
 expected_stdout_regex = "hello"

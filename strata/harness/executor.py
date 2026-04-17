@@ -22,6 +22,7 @@ off the ``success`` field; letting exceptions escape would require a parallel
 from __future__ import annotations
 
 import contextlib
+import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Final, cast
 
@@ -131,12 +132,18 @@ class PrimitiveTaskExecutor:
 
     # ── GUI lane ──
 
+    _GUI_SETTLE_DELAY: Final[float] = 0.8
+
     def _run_gui(self, action: str, task: TaskNode) -> ActionResult:
         fn = self._gui_dispatcher(action, task)
         if self._gui_lock is None:
-            return self._call_safely(fn)
-        with self._gui_lock:
-            return self._call_safely(fn)
+            result = self._call_safely(fn)
+        else:
+            with self._gui_lock:
+                result = self._call_safely(fn)
+        if result.success:
+            time.sleep(self._GUI_SETTLE_DELAY)
+        return result
 
     def _gui_dispatcher(self, action: str, task: TaskNode) -> Callable[[], ActionResult]:
         if action == "click":

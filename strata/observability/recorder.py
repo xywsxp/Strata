@@ -116,7 +116,12 @@ class OSWorldFFmpegRecorder:
                 f"    '-i',':0',\n"
                 f"    '-codec:v','libx264','-preset','ultrafast','-pix_fmt','yuv420p',\n"
                 f"    '/tmp/strata_rec/{run_id}.mp4'\n"
-                f"])\n"
+                f"],\n"
+                f"    stdin=subprocess.DEVNULL,\n"
+                f"    stdout=subprocess.DEVNULL,\n"
+                f"    stderr=subprocess.DEVNULL,\n"
+                f"    start_new_session=True,\n"
+                f")\n"
                 f"with open('/tmp/strata_rec/{run_id}.pid','w') as f:\n"
                 f"    f.write(str(p.pid))\n"
             )

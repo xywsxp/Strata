@@ -1,0 +1,27 @@
+[task]
+id = "chrome-search-reimu"
+goal = """在 Ubuntu 桌面上使用 GUI 操作完成以下任务：
+
+目标：打开 Google Chrome 浏览器，在 Google 上搜索「博丽灵梦」并点开第一个搜索结果。
+
+步骤指导（全部通过 GUI 操作）：
+1. 找到并点击桌面任务栏（左侧 Dock 或底部）中的 Google Chrome 图标启动浏览器
+   - Chrome 图标是一个红/绿/黄/蓝色的圆形图标
+   - 如果找不到图标，可以在终端输入 google-chrome 然后按 Enter
+2. 等待 Chrome 窗口打开完成
+3. 点击地址栏（页面顶部的 URL 输入框）
+4. 输入 www.google.com 然后按 Enter
+5. 等待 Google 首页加载完成
+6. 找到并点击 Google 搜索框（页面中间的大输入框）
+7. 输入搜索词：Reimu Hakurei 然后按 Enter
+8. 等待搜索结果页面加载完成
+9. 点击第一个搜索结果（第一条蓝色标题链接）
+
+重要要求：
+- 必须使用 Google Chrome 浏览器（不是 Firefox）
+- 必须使用 locate_and_click、type_text、press_key 等 GUI 动作
+- 不要使用 execute_command
+- 搜索关键词用英文 Reimu Hakurei（避免中文输入法问题）
+"""
+tags = ["gui", "browser", "chrome"]
+timeout_s = 300
