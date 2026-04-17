@@ -35,7 +35,7 @@ def osworld_url(repo_config: StrataConfig) -> str:
     if not repo_config.osworld.enabled:
         pytest.skip("osworld.enabled=false in config.toml")
 
-    from strata.health import check_osworld
+    from strata.core.health import check_osworld
 
     status = check_osworld(repo_config)
     if not status.ok:

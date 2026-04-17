@@ -12,7 +12,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from strata.paths import PathsConfig, RunDirLayout, gc_old_runs
+from strata.core.paths import PathsConfig, RunDirLayout, gc_old_runs
 
 
 class TestPathsConfig:

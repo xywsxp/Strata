@@ -15,7 +15,7 @@ from typing import Literal
 import icontract
 
 from strata.core.errors import ConfigError
-from strata.paths import PathsConfig
+from strata.core.paths import PathsConfig
 
 # ── Sub-config dataclasses ──
 

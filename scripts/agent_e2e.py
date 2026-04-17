@@ -116,7 +116,7 @@ DEFAULT_GOALS: tuple[str, ...] = (
 def main(goals: list[str]) -> int:
     cfg = load_config("./config.toml")
 
-    from strata.health import check_all, require_healthy
+    from strata.core.health import check_all, require_healthy
 
     statuses = check_all(cfg)
     for s in statuses:

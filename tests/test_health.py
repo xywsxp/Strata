@@ -16,14 +16,14 @@ from strata.core.config import (
     StrataConfig,
     TerminalConfig,
 )
-from strata.health import (
+from strata.core.health import (
     HealthStatus,
     check_all,
     check_llm_providers,
     check_osworld,
     require_healthy,
 )
-from strata.paths import PathsConfig
+from strata.core.paths import PathsConfig
 
 
 def _minimal_config(
@@ -87,7 +87,7 @@ def _minimal_config(
 
 
 class TestCheckLLMProviders:
-    @patch("strata.health.OpenAICompatProvider")
+    @patch("strata.core.health.OpenAICompatProvider")
     def test_success_with_mock_provider(self, mock_cls: MagicMock) -> None:
         mock_instance = MagicMock()
         mock_instance.chat.return_value = MagicMock(
@@ -103,7 +103,7 @@ class TestCheckLLMProviders:
         assert "test_provider" in results[0].component
         assert results[0].latency_ms >= 0
 
-    @patch("strata.health.OpenAICompatProvider")
+    @patch("strata.core.health.OpenAICompatProvider")
     def test_failure_with_unreachable_provider(self, mock_cls: MagicMock) -> None:
         mock_cls.side_effect = ConnectionError("unreachable")
 
@@ -116,7 +116,7 @@ class TestCheckLLMProviders:
 
 
 class TestCheckOSWorld:
-    @patch("strata.health.urllib.request.urlopen")
+    @patch("strata.core.health.urllib.request.urlopen")
     def test_success_with_mock_server(self, mock_urlopen: MagicMock) -> None:
         mock_resp = MagicMock()
         mock_resp.read.return_value = b'{"width": 1920, "height": 1080}'
@@ -131,7 +131,7 @@ class TestCheckOSWorld:
         assert "1920" in result.detail
         assert "1080" in result.detail
 
-    @patch("strata.health.urllib.request.urlopen")
+    @patch("strata.core.health.urllib.request.urlopen")
     def test_failure_with_unreachable_server(self, mock_urlopen: MagicMock) -> None:
         mock_urlopen.side_effect = ConnectionError("refused")
 
@@ -143,7 +143,7 @@ class TestCheckOSWorld:
 
 
 class TestCheckAll:
-    @patch("strata.health.OpenAICompatProvider")
+    @patch("strata.core.health.OpenAICompatProvider")
     def test_includes_llm_when_providers_exist(self, mock_cls: MagicMock) -> None:
         mock_instance = MagicMock()
         mock_instance.chat.return_value = MagicMock(content="ok")
@@ -155,8 +155,8 @@ class TestCheckAll:
         assert len(results) >= 1
         assert any("llm/" in s.component for s in results)
 
-    @patch("strata.health.urllib.request.urlopen")
-    @patch("strata.health.OpenAICompatProvider")
+    @patch("strata.core.health.urllib.request.urlopen")
+    @patch("strata.core.health.OpenAICompatProvider")
     def test_includes_osworld_when_enabled(
         self, mock_cls: MagicMock, mock_urlopen: MagicMock
     ) -> None:

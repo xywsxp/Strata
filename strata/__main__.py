@@ -45,7 +45,7 @@ def main() -> None:
         print(f"[Strata] Config error: {redact(str(exc))}", file=sys.stderr)
         sys.exit(1)
 
-    from strata.health import check_all, require_healthy
+    from strata.core.health import check_all, require_healthy
 
     statuses = check_all(config)
     for s in statuses:

@@ -36,7 +36,7 @@ class TestE2ETaskExecution:
     ) -> None:
         """Execute create-hello-txt task through the full pipeline."""
         from scripts.run_tasks import TaskReport, _run_single
-        from strata.tasks import TaskFile
+        from strata.planner.tasks import TaskFile
 
         task_path = Path("tasks/create-hello-txt.toml")
         if not task_path.exists():
@@ -58,7 +58,7 @@ class TestE2ETaskExecution:
     ) -> None:
         """Execute read-hostname task through the full pipeline."""
         from scripts.run_tasks import TaskReport, _run_single
-        from strata.tasks import TaskFile
+        from strata.planner.tasks import TaskFile
 
         task_path = Path("tasks/read-hostname.toml")
         if not task_path.exists():
@@ -78,7 +78,7 @@ class TestE2ETaskExecution:
     ) -> None:
         """Run a single task and verify the report JSON structure."""
         from scripts.run_tasks import TaskReport, _run_single, _write_report
-        from strata.tasks import TaskFile
+        from strata.planner.tasks import TaskFile
 
         task_path = Path("tasks/read-hostname.toml")
         if not task_path.exists():

@@ -93,7 +93,7 @@ class TestLiveVisionProvider:
 class TestHealthCheckLive:
     def test_health_check_all_providers_pass(self, repo_config: StrataConfig) -> None:
         """All configured providers must pass health check with real API keys."""
-        from strata.health import check_llm_providers
+        from strata.core.health import check_llm_providers
 
         statuses = check_llm_providers(repo_config)
         for s in statuses:

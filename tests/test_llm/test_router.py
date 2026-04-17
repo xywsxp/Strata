@@ -37,7 +37,7 @@ class TestRouterInit:
             StrataConfig,
             TerminalConfig,
         )
-        from strata.paths import PathsConfig
+        from strata.core.paths import PathsConfig
 
         cfg = StrataConfig(
             log_level="INFO",

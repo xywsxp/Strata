@@ -8,7 +8,7 @@ from pathlib import Path
 import icontract
 import pytest
 
-from strata.tasks import TaskFile, TaskFileError
+from strata.planner.tasks import TaskFile, TaskFileError
 
 MINIMAL_TASK = textwrap.dedent("""\
     [task]

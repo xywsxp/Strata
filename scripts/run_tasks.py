@@ -28,11 +28,11 @@ from pathlib import Path
 from typing import Literal
 
 from strata.core.config import load_config
+from strata.core.paths import RunDirLayout
 from strata.env.factory import EnvironmentFactory
 from strata.harness.orchestrator import AgentOrchestrator, ExecutionResult
 from strata.observability.transcript import FileChatTranscriptSink
-from strata.paths import RunDirLayout
-from strata.tasks import TaskFile, TaskFileError
+from strata.planner.tasks import TaskFile, TaskFileError
 
 # ── Auto-confirming UI (reused from agent_e2e.py pattern) ──
 
@@ -343,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"No tasks match tag {args.tag!r}", file=sys.stderr)
             return 2
 
-    from strata.health import check_all, require_healthy
+    from strata.core.health import check_all, require_healthy
 
     cfg = load_config(args.config)
     statuses = check_all(cfg)

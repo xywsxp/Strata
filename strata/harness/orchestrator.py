@@ -37,6 +37,7 @@ from strata.core.errors import (
     PlannerError,
     SerializationError,
 )
+from strata.core.paths import RunDirLayout, gc_old_runs
 from strata.core.types import ActionResult, GlobalState, TaskGraph, TaskNode, TaskState
 from strata.env.protocols import EnvironmentBundle
 from strata.grounding.terminal_handler import TerminalHandler
@@ -60,7 +61,6 @@ from strata.observability.recorder import (
     TrajectoryRecorder,
 )
 from strata.observability.transcript import ChatTranscriptSink
-from strata.paths import RunDirLayout, gc_old_runs
 from strata.planner.adjuster import Adjustment, adjust_plan, apply_adjustment
 from strata.planner.htn import decompose_goal
 
