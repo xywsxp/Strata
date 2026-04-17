@@ -151,6 +151,38 @@ class TestLLMProviderConfigRepr:
         assert "sk-placeholder" not in r
 
 
+class TestPathsConfig:
+    def test_load_config_with_paths_section(self, tmp_path: Path) -> None:
+        toml = MINIMAL_TOML + textwrap.dedent("""
+            [paths]
+            run_root = "/tmp/strata-test-runs"
+            keep_last_runs = 10
+        """)
+        p = tmp_path / "config.toml"
+        p.write_text(toml)
+        cfg = load_config(str(p))
+        assert cfg.paths.run_root == "/tmp/strata-test-runs"
+        assert cfg.paths.keep_last_runs == 10
+
+    def test_load_config_missing_paths_uses_defaults(self, tmp_path: Path) -> None:
+        p = tmp_path / "config.toml"
+        p.write_text(MINIMAL_TOML)
+        cfg = load_config(str(p))
+        assert "runs-fallback" in cfg.paths.run_root
+        assert cfg.paths.keep_last_runs == 5
+
+    def test_paths_run_root_expands_tilde(self, tmp_path: Path) -> None:
+        toml = MINIMAL_TOML + textwrap.dedent("""
+            [paths]
+            run_root = "~/.strata/my-runs"
+        """)
+        p = tmp_path / "config.toml"
+        p.write_text(toml)
+        cfg = load_config(str(p))
+        assert "~" not in cfg.paths.run_root
+        assert cfg.paths.run_root.endswith("my-runs")
+
+
 class TestOSWorldConfig:
     def test_osworld_defaults(self) -> None:
         cfg = get_default_config()

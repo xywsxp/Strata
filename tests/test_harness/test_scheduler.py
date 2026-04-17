@@ -1,4 +1,4 @@
-"""Tests for strata.harness.scheduler — LinearScheduler."""
+"""Tests for strata.harness.scheduler — LinearRunner."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from collections.abc import Mapping
 
 from strata.core.config import get_default_config
 from strata.core.types import ActionResult, TaskGraph, TaskNode
-from strata.harness.scheduler import LinearScheduler
+from strata.harness.scheduler import LinearRunner
 
 
 class _MockExecutor:
@@ -30,7 +30,7 @@ class TestLinearThreeTasks:
             ),
         )
         executor = _MockExecutor()
-        scheduler = LinearScheduler(get_default_config())
+        scheduler = LinearRunner(get_default_config())
         results = scheduler.run(graph, executor)
         assert executor.call_order == ["t1", "t2", "t3"]
         assert len(results) == 3
@@ -55,6 +55,6 @@ class TestRepeatMaxIterations:
                 return ActionResult(success=True)
 
         executor = _CountExec()
-        scheduler = LinearScheduler(get_default_config())
+        scheduler = LinearRunner(get_default_config())
         scheduler.run(graph, executor)
         assert executor.count <= 3

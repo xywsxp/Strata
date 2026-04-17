@@ -1,9 +1,10 @@
 ---
 description: FV Write Agent — use when implementing a FV step: specification first (types + contracts + properties), then minimal code; SPECIFY-IMPLEMENT-VERIFY. NOT for reviewing or auditing.
 alwaysApply: false
+model: inherit
 ---
 
-# FV Write Agent
+# FV Write Agent（请你使用和主模型一样的模型）
 
 唯一职责：输出 Specification Scratchpad，契约+类型先行，写最小实现令验证栈通过。
 

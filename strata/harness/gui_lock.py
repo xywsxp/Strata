@@ -63,11 +63,24 @@ class AtomicGUITransaction:
         max_wait: float = 30.0,
         auxiliary_fn: Callable[[], None] | None = None,
     ) -> ActionResult:
-        """Poll check_fn under lock; once True, run act_fn atomically."""
+        """Poll check_fn under lock; once True, run act_fn atomically.
+
+        Enforces a strict deadline: total wall-clock time from entry to either
+        successful action or :class:`GUILockTimeoutError` is bounded by
+        ``max_wait``. Each lock-acquire attempt is passed the remaining budget
+        (``deadline - now``), so a slow lock plus a slow poll cannot sum to
+        more than ``max_wait``.
+        """
         start = time.monotonic()
+        deadline = start + max_wait
         while True:
-            if not self._lock.acquire(timeout=max_wait):
-                raise GUILockTimeoutError("timeout acquiring lock for transaction")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GUILockTimeoutError(f"wait_and_act exceeded max_wait={max_wait:.1f}s")
+            if not self._lock.acquire(timeout=remaining):
+                raise GUILockTimeoutError(
+                    f"timeout acquiring lock within {remaining:.1f}s remaining"
+                )
             try:
                 if check_fn():
                     return act_fn()
@@ -76,7 +89,7 @@ class AtomicGUITransaction:
             finally:
                 self._lock.release()
 
-            elapsed = time.monotonic() - start
-            if elapsed >= max_wait:
-                raise GUILockTimeoutError(f"wait_and_act timed out after {elapsed:.1f}s")
-            time.sleep(self._interval)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GUILockTimeoutError(f"wait_and_act timed out after {max_wait:.1f}s")
+            time.sleep(min(self._interval, remaining))

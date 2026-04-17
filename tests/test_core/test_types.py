@@ -38,13 +38,7 @@ class TestFrozenImmutability:
             c.x = 5.0  # type: ignore[misc]
 
     def test_command_result_frozen(self) -> None:
-        cr = CommandResult(
-            stdout="ok",
-            stderr="",
-            returncode=0,
-            timed_out=False,
-            interrupted_by_silence=False,
-        )
+        cr = CommandResult(stdout="ok", stderr="", returncode=0)
         with pytest.raises(dataclasses.FrozenInstanceError):
             cr.returncode = 1  # type: ignore[misc]
 

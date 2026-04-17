@@ -147,6 +147,7 @@ def _stub_decompose_goal(monkeypatch: pytest.MonkeyPatch, graph: TaskGraph) -> N
         router: object,
         available_actions: Sequence[str],
         context: Mapping[str, object] | None = None,
+        action_catalog: str | None = None,
     ) -> TaskGraph:
         return graph if graph.goal == goal else TaskGraph(goal=goal, tasks=graph.tasks)
 
@@ -162,6 +163,7 @@ def _stub_decompose_raise(monkeypatch: pytest.MonkeyPatch, exc: Exception) -> No
         router: object,
         available_actions: Sequence[str],
         context: Mapping[str, object] | None = None,
+        action_catalog: str | None = None,
     ) -> TaskGraph:
         raise exc
 
@@ -415,6 +417,7 @@ def test_run_goal_always_terminates(
             router: object,
             available_actions: Sequence[str],
             context: Mapping[str, object] | None = None,
+            action_catalog: str | None = None,
         ) -> TaskGraph:
             return graph
 
@@ -680,6 +683,7 @@ class TestContextManagerWiring:
             failed_task_id: str,
             failure_context: Mapping[str, object],
             router: object,
+            action_catalog: str | None = None,
         ) -> object:
             captured.append(failure_context)
             raise PlannerError("stop")

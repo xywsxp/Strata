@@ -54,3 +54,18 @@ class TestAtomicTransaction:
         txn = AtomicGUITransaction(lock, _GUI_CFG)
         with pytest.raises(GUILockTimeoutError):
             txn.wait_and_act(lambda: False, lambda: ActionResult(success=True), max_wait=0.2)
+
+    def test_strict_deadline_not_exceeded(self) -> None:
+        """Wall-clock must not exceed max_wait by more than a small tolerance."""
+        import time
+
+        lock = GUILock(_GUI_CFG)
+        txn = AtomicGUITransaction(lock, _GUI_CFG)
+        max_wait = 0.3
+        start = time.monotonic()
+        with pytest.raises(GUILockTimeoutError):
+            txn.wait_and_act(lambda: False, lambda: ActionResult(success=True), max_wait=max_wait)
+        elapsed = time.monotonic() - start
+        assert elapsed <= max_wait + 0.2, (
+            f"strict deadline violated: elapsed={elapsed:.3f}s, max_wait={max_wait}s"
+        )

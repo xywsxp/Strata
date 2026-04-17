@@ -340,13 +340,21 @@ class PrimitiveTaskExecutor:
     # ── helpers ──
 
     def _call_safely(self, fn: Callable[[], ActionResult]) -> ActionResult:
-        """Run ``fn`` and convert any :class:`StrataError` into a failed result.
+        """Run ``fn`` and convert any runtime env/I-O failure into a failed
+        :class:`ActionResult` so the Orchestrator can drive its recovery
+        pipeline.
 
-        ``ActionParamsError`` is deliberately re-raised: it represents a
-        programming error in the planner output (missing required param), and
-        should surface as an exception for the Orchestrator to treat as an
-        unrecoverable planning defect. Other ``StrataError`` subclasses (env,
-        grounding, LLM) are converted to ``ActionResult(success=False)``.
+        ``ActionParamsError`` / ``UnknownActionError`` are deliberately re-raised:
+        they represent a programming error in the planner output (missing
+        required param / unknown action) and should surface as an exception so
+        the Orchestrator treats them as an unrecoverable planning defect.
+
+        Other ``StrataError`` subclasses (env, grounding, LLM) **and** bare
+        ``OSError`` (file-not-found, permission denied, broken pipe from env
+        adapters that don't wrap every OS failure) are converted to
+        ``ActionResult(success=False)``. Without the ``OSError`` leg, a missing
+        file on a ``read_file`` action crashes the goal loop instead of
+        triggering retry/replan.
         """
         try:
             return fn()
@@ -355,6 +363,8 @@ class PrimitiveTaskExecutor:
         except UnknownActionError:
             raise
         except StrataError as exc:
+            return ActionResult(success=False, error=f"{type(exc).__name__}: {exc}")
+        except OSError as exc:
             return ActionResult(success=False, error=f"{type(exc).__name__}: {exc}")
 
     def _record_audit(self, task: TaskNode, result: ActionResult) -> None:

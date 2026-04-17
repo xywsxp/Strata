@@ -37,6 +37,7 @@ class TestRouterInit:
             StrataConfig,
             TerminalConfig,
         )
+        from strata.paths import PathsConfig
 
         cfg = StrataConfig(
             log_level="INFO",
@@ -76,6 +77,7 @@ class TestRouterInit:
                 action_space="computer_13",
                 docker_image=None,
             ),
+            paths=PathsConfig(run_root="/tmp/strata-test", keep_last_runs=5),
             max_loop_iterations=50,
         )
         with pytest.raises(icontract.ViolationError):

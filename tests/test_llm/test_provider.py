@@ -124,3 +124,44 @@ class TestMessageToOpenAI:
         assert len(content) == 2
         assert content[0]["type"] == "text"
         assert content[1]["type"] == "image_url"
+
+
+# ── Phase 10.4: LLM error classification ──
+
+
+class TestClassifyOpenAIError:
+    def test_rate_limit_is_transient(self) -> None:
+        import openai
+
+        from strata.core.errors import LLMTransientError
+        from strata.llm.provider import _classify_openai_error
+
+        resp = MagicMock()
+        resp.request = MagicMock()
+        exc = openai.RateLimitError("429", response=resp, body=None)
+        classified = _classify_openai_error(exc)
+        assert isinstance(classified, LLMTransientError)
+
+    def test_auth_is_permanent(self) -> None:
+        import openai
+
+        from strata.core.errors import LLMPermanentError
+        from strata.llm.provider import _classify_openai_error
+
+        resp = MagicMock()
+        resp.request = MagicMock()
+        exc = openai.AuthenticationError("401", response=resp, body=None)
+        classified = _classify_openai_error(exc)
+        assert isinstance(classified, LLMPermanentError)
+
+    def test_bad_request_is_permanent(self) -> None:
+        import openai
+
+        from strata.core.errors import LLMPermanentError
+        from strata.llm.provider import _classify_openai_error
+
+        resp = MagicMock()
+        resp.request = MagicMock()
+        exc = openai.BadRequestError("400", response=resp, body=None)
+        classified = _classify_openai_error(exc)
+        assert isinstance(classified, LLMPermanentError)

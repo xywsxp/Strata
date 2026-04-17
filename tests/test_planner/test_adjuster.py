@@ -205,3 +205,38 @@ def test_prop_apply_adjustment_preserves_other_tasks(g: TaskGraph) -> None:
     original_other_ids = {t.id for t in g.tasks if t.id != target.id}
     result_ids = {t.id for t in result.tasks}
     assert original_other_ids.issubset(result_ids)
+
+
+# ── Phase 10.4: markdown fence stripping ──
+
+
+class TestMarkdownFenceStripping:
+    def test_parse_strips_json_fence(self) -> None:
+        payload = {
+            "strategy": "replace",
+            "replacement_tasks": [{"id": "fence_t1", "task_type": "primitive", "action": "retry"}],
+        }
+        raw = "```json\n" + json.dumps(payload) + "\n```"
+        router = _make_mock_router(raw)
+        result = adjust_plan(_sample_graph(), "t2", {"error": "x"}, router)
+        assert result.original_task_id == "t2"
+        assert result.replacement_tasks[0].id == "fence_t1"
+
+    def test_parse_strips_plain_fence(self) -> None:
+        payload = {
+            "strategy": "replace",
+            "replacement_tasks": [{"id": "fence_t2", "task_type": "primitive", "action": "retry"}],
+        }
+        raw = "```\n" + json.dumps(payload) + "\n```"
+        router = _make_mock_router(raw)
+        result = adjust_plan(_sample_graph(), "t2", {"error": "x"}, router)
+        assert result.replacement_tasks[0].id == "fence_t2"
+
+    def test_unfenced_json_passes_through(self) -> None:
+        payload = {
+            "strategy": "replace",
+            "replacement_tasks": [{"id": "plain_t", "task_type": "primitive", "action": "retry"}],
+        }
+        router = _make_mock_router(json.dumps(payload))
+        result = adjust_plan(_sample_graph(), "t2", {"error": "x"}, router)
+        assert result.replacement_tasks[0].id == "plain_t"

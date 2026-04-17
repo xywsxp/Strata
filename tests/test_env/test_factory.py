@@ -17,7 +17,7 @@ class TestFactoryPlatformCheck:
 
         assert isinstance(mock_sys, um.MagicMock)
         mock_sys.platform = "win32"
-        with pytest.raises(UnsupportedPlatformError, match="当前仅支持 Linux"):
+        with pytest.raises(UnsupportedPlatformError, match="not implemented"):
             from strata.core.config import get_default_config
 
             EnvironmentFactory.create(get_default_config())
@@ -28,7 +28,22 @@ class TestFactoryPlatformCheck:
 
         assert isinstance(mock_sys, um.MagicMock)
         mock_sys.platform = "darwin"
-        with pytest.raises(UnsupportedPlatformError, match="当前仅支持 Linux"):
+        with pytest.raises(UnsupportedPlatformError, match="not implemented"):
             from strata.core.config import get_default_config
 
+            EnvironmentFactory.create(get_default_config())
+
+
+class TestFactoryLinuxStubFailFast:
+    def test_linux_without_osworld_raises_on_gui_stub(self) -> None:
+        """On Linux with osworld.enabled=false, LinuxGUIAdapter stub triggers
+        UnsupportedPlatformError at construction time — factory must propagate.
+        """
+        import sys
+
+        if sys.platform != "linux":
+            pytest.skip("Linux-only check")
+        from strata.core.config import get_default_config
+
+        with pytest.raises(UnsupportedPlatformError, match="Linux native GUI"):
             EnvironmentFactory.create(get_default_config())

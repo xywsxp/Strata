@@ -74,12 +74,17 @@ class TestTopologicalPruning:
         assert len(ctx.siblings) == 1
         assert ctx.siblings[0].id == "s2"
 
-    def test_missing_task_raises(self) -> None:
+    def test_missing_task_raises_context_error(self) -> None:
         import pytest
 
+        from strata import StrataError
+        from strata.core.errors import ContextError, HarnessError
+
         graph = TaskGraph(goal="test", tasks=(TaskNode(id="t1", task_type="primitive"),))
-        with pytest.raises(ValueError, match="not in graph"):
+        with pytest.raises(ContextError, match="not in graph") as exc_info:
             extract_local_context(graph, "nonexistent")
+        assert isinstance(exc_info.value, HarnessError)
+        assert isinstance(exc_info.value, StrataError)
 
 
 # ── ContextManager ──

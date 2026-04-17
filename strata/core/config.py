@@ -15,6 +15,7 @@ from typing import Literal
 import icontract
 
 from strata.core.errors import ConfigError
+from strata.paths import PathsConfig
 
 # ── Sub-config dataclasses ──
 
@@ -81,6 +82,10 @@ class OSWorldConfig:
     headless: bool
     action_space: str
     docker_image: str | None
+    # CONVENTION: HTTP 直连 OSWorld Docker server（port 5000 是上游默认），
+    # 避免安装 desktop_env Python 包带来的 torch/easyocr 依赖地狱。
+    server_url: str = "http://localhost:5000"
+    request_timeout: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -95,6 +100,7 @@ class StrataConfig:
     terminal: TerminalConfig
     memory: MemoryConfig
     osworld: OSWorldConfig
+    paths: PathsConfig
     max_loop_iterations: int
     dangerous_patterns: Sequence[str] = field(default_factory=tuple)
     auto_confirm_level: Literal["none", "low", "medium", "high"] = "low"
@@ -213,6 +219,16 @@ def _parse_memory(raw: object) -> MemoryConfig:
     )
 
 
+def _parse_paths(raw: object) -> PathsConfig:
+    section = raw if isinstance(raw, dict) else {}
+    run_root = str(section.get("run_root", "~/.strata/runs-fallback"))
+    keep = int(section.get("keep_last_runs", 5))
+    return PathsConfig(
+        run_root=_expand(run_root),
+        keep_last_runs=keep,
+    )
+
+
 def _parse_osworld(raw: object) -> OSWorldConfig:
     section = raw if isinstance(raw, dict) else {}
     screen_raw = section.get("screen_size", [1920, 1080])
@@ -226,6 +242,8 @@ def _parse_osworld(raw: object) -> OSWorldConfig:
         headless=bool(section.get("headless", True)),
         action_space=str(section.get("action_space", "computer_13")),
         docker_image=str(docker_img) if docker_img is not None else None,
+        server_url=str(section.get("server_url", "http://localhost:5000")),
+        request_timeout=float(section.get("request_timeout", 30.0)),
     )
 
 
@@ -263,6 +281,7 @@ def load_config(path: str | None = None) -> StrataConfig:
     terminal = _parse_terminal(data.get("terminal"))
     gui = _parse_gui(data.get("gui"))
     memory = _parse_memory(data.get("memory"))
+    paths = _parse_paths(data.get("paths"))
     osworld = _parse_osworld(data.get("osworld"))
 
     dangerous_raw = data.get("dangerous_patterns", ())
@@ -283,6 +302,7 @@ def load_config(path: str | None = None) -> StrataConfig:
         terminal=terminal,
         memory=memory,
         osworld=osworld,
+        paths=paths,
         max_loop_iterations=int(data.get("max_loop_iterations", 50)),
         dangerous_patterns=dangerous,
         auto_confirm_level=str(data.get("auto_confirm_level", "low")),  # type: ignore[arg-type]
@@ -343,6 +363,10 @@ def get_default_config() -> StrataConfig:
             headless=True,
             action_space="computer_13",
             docker_image=None,
+        ),
+        paths=PathsConfig(
+            run_root=_expand("~/.strata/runs-fallback"),
+            keep_last_runs=5,
         ),
         max_loop_iterations=50,
         dangerous_patterns=("rm -rf", "mkfs", "dd if=", "> /dev/", "chmod 777"),

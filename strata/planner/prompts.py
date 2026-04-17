@@ -35,6 +35,16 @@ Output ONLY a valid JSON object with this schema:
 Rules:
 - Each task must have a unique "id".
 - Use only the available actions listed by the user for primitive task "action" fields.
+- Use EXACTLY the parameter key names shown in the action catalog — do NOT
+  rename them (e.g. always use "path", never "file_path" or "directory").
+- Respect the "Additional context" block:
+    * If ``sandbox_enabled`` is ``false``, use file paths verbatim as the user
+      specified them — do NOT rewrite ``/tmp/x`` into any sandbox root.
+    * If ``sandbox_enabled`` is ``true``, all file paths for ``read_file`` /
+      ``write_file`` / ``list_directory`` / ``move_to_trash`` must resolve
+      inside ``sandbox_root`` (prefix with that root, e.g.
+      ``~/strata-sandbox/foo.txt``), except paths inside ``read_only_paths``
+      which may be read directly.
 - Keep the plan minimal — prefer fewer tasks.
 - Dependencies must reference existing task IDs.
 - Do NOT include any text outside the JSON object.
@@ -85,6 +95,10 @@ Parent task ID: {parent_id}
 Failure context: {failure_context_json}
 
 Existing task IDs (do NOT reuse): {existing_ids}
+
+Action catalog (use these EXACT parameter key names — any other key \
+will be rejected as a schema violation):
+{action_catalog}
 
 Generate replacement tasks JSON now.\
 """

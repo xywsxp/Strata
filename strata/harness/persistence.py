@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tempfile
@@ -11,6 +12,7 @@ from pathlib import Path
 
 import icontract
 
+from strata.core.errors import PersistenceSchemaVersionError, SerializationError
 from strata.core.types import (
     GlobalState,
     TaskGraph,
@@ -19,7 +21,14 @@ from strata.core.types import (
     task_graph_to_dict,
 )
 
+CHECKPOINT_SCHEMA_VERSION = 1
+_SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
 
+
+@icontract.invariant(
+    lambda self: self.schema_version >= 1,
+    "schema_version must be positive",
+)
 @dataclass(frozen=True)
 class Checkpoint:
     global_state: GlobalState
@@ -27,6 +36,7 @@ class Checkpoint:
     context: Mapping[str, object]
     task_graph: TaskGraph
     timestamp: float
+    schema_version: int = CHECKPOINT_SCHEMA_VERSION
 
 
 @icontract.require(
@@ -42,23 +52,37 @@ class Checkpoint:
     "no .tmp residue after write",
 )
 def atomic_write(path: str, content: bytes) -> None:
-    """Write *content* to *path* atomically (tmp + fsync + replace)."""
+    """Write *content* to *path* atomically (tmp + fsync + replace).
+
+    Cleanup invariants (guaranteed even on KeyboardInterrupt / SystemExit):
+    - The fd is closed exactly once.
+    - The tmp file is unlinked iff the final replace did not succeed.
+    """
     parent = os.path.dirname(path)
     fd, tmp_path = tempfile.mkstemp(dir=parent, suffix=".tmp")
+    closed = False
+    replaced = False
     try:
-        os.write(fd, content)
-        os.fsync(fd)
-        os.close(fd)
+        try:
+            os.write(fd, content)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+            closed = True
         os.replace(tmp_path, path)
-    except BaseException:
-        os.close(fd) if not os.get_inheritable(fd) else None
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        raise
+        replaced = True
+    finally:
+        if not closed:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if not replaced:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp_path)
 
 
 def _checkpoint_to_dict(cp: Checkpoint) -> dict[str, object]:
     return {
+        "schema_version": cp.schema_version,
         "global_state": cp.global_state,
         "task_states": dict(cp.task_states),
         "context": dict(cp.context),
@@ -68,6 +92,17 @@ def _checkpoint_to_dict(cp: Checkpoint) -> dict[str, object]:
 
 
 def _checkpoint_from_dict(d: Mapping[str, object]) -> Checkpoint:
+    if "schema_version" not in d:
+        raise PersistenceSchemaVersionError(
+            "checkpoint missing schema_version field; refusing to load (fail-fast)"
+        )
+    version_raw = d["schema_version"]
+    if not isinstance(version_raw, int) or version_raw not in _SUPPORTED_SCHEMA_VERSIONS:
+        raise PersistenceSchemaVersionError(
+            f"unsupported checkpoint schema_version={version_raw!r}; "
+            f"supported={sorted(_SUPPORTED_SCHEMA_VERSIONS)}"
+        )
+
     task_states_raw = d.get("task_states", {})
     task_states: dict[str, TaskState] = {}
     if isinstance(task_states_raw, dict):
@@ -80,12 +115,20 @@ def _checkpoint_from_dict(d: Mapping[str, object]) -> Checkpoint:
     graph_raw = d.get("task_graph", {})
     graph_dict = dict(graph_raw) if isinstance(graph_raw, dict) else {}
 
+    try:
+        task_graph = task_graph_from_dict(graph_dict)
+    except SerializationError:
+        raise
+    except (KeyError, TypeError, ValueError) as e:
+        raise SerializationError(f"failed to deserialize task_graph: {e}") from e
+
     return Checkpoint(
         global_state=str(d.get("global_state", "INIT")),  # type: ignore[arg-type]
         task_states=task_states,
         context=context,
-        task_graph=task_graph_from_dict(graph_dict),
+        task_graph=task_graph,
         timestamp=float(d.get("timestamp", 0.0)),  # type: ignore[arg-type]
+        schema_version=version_raw,
     )
 
 

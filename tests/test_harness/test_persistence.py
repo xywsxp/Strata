@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
+import pytest
+
+from strata.core.errors import PersistenceSchemaVersionError
 from strata.core.types import TaskGraph
-from strata.harness.persistence import Checkpoint, PersistenceManager, atomic_write
+from strata.harness.persistence import (
+    CHECKPOINT_SCHEMA_VERSION,
+    Checkpoint,
+    PersistenceManager,
+    atomic_write,
+)
 
 
 class TestAtomicWrite:
@@ -40,3 +49,50 @@ class TestCheckpointRoundtrip:
     def test_load_no_checkpoint(self, tmp_path: Path) -> None:
         mgr = PersistenceManager(str(tmp_path / "empty"))
         assert mgr.load_checkpoint() is None
+
+    def test_default_schema_version(self) -> None:
+        cp = Checkpoint(
+            global_state="INIT",
+            task_states={},
+            context={},
+            task_graph=TaskGraph(goal="x"),
+            timestamp=0.0,
+        )
+        assert cp.schema_version == CHECKPOINT_SCHEMA_VERSION
+
+
+class TestCheckpointSchemaVersion:
+    def test_missing_schema_version_raises(self, tmp_path: Path) -> None:
+        mgr = PersistenceManager(str(tmp_path / "state"))
+        Path(mgr._checkpoint_path).write_text(
+            json.dumps(
+                {
+                    "global_state": "INIT",
+                    "task_states": {},
+                    "context": {},
+                    "task_graph": {"goal": "x", "tasks": [], "methods": {}},
+                    "timestamp": 0.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(PersistenceSchemaVersionError):
+            mgr.load_checkpoint()
+
+    def test_unknown_schema_version_raises(self, tmp_path: Path) -> None:
+        mgr = PersistenceManager(str(tmp_path / "state"))
+        Path(mgr._checkpoint_path).write_text(
+            json.dumps(
+                {
+                    "schema_version": 999,
+                    "global_state": "INIT",
+                    "task_states": {},
+                    "context": {},
+                    "task_graph": {"goal": "x", "tasks": [], "methods": {}},
+                    "timestamp": 0.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(PersistenceSchemaVersionError):
+            mgr.load_checkpoint()

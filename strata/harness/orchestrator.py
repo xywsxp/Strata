@@ -42,7 +42,7 @@ from strata.env.protocols import EnvironmentBundle
 from strata.grounding.terminal_handler import TerminalHandler
 from strata.grounding.validator import ActionValidator
 from strata.grounding.vision_locator import VisionLocator
-from strata.harness.actions import ACTION_VOCABULARY
+from strata.harness.actions import ACTION_VOCABULARY, format_action_catalog_for_llm
 from strata.harness.context import AuditLogger, ContextManager
 from strata.harness.executor import PrimitiveTaskExecutor
 from strata.harness.gui_lock import GUILock
@@ -55,6 +55,7 @@ from strata.harness.state_machine import (
     create_global_state_machine,
 )
 from strata.llm.router import LLMRouter
+from strata.paths import RunDirLayout, gc_old_runs
 from strata.planner.adjuster import Adjustment, adjust_plan, apply_adjustment
 from strata.planner.htn import decompose_goal
 
@@ -114,18 +115,21 @@ class AgentOrchestrator:
         ui: AgentUI,
         llm_router: LLMRouter | None = None,
         executor: TaskExecutor | None = None,
+        layout: RunDirLayout | None = None,
     ) -> None:
         self._config = config
         self._bundle = bundle
         self._ui = ui
+        self._layout = layout
         # CONVENTION: llm_router 可选注入 —— 生产路径由 __main__ 构造一次；
         # 测试可传 mock 免去 OpenAI 客户端构造的网络依赖。
         self._llm_router = llm_router if llm_router is not None else LLMRouter(config)
-        self._audit_logger = AuditLogger(config.audit_log)
         self._context = ContextManager(config.memory)
-        # CONVENTION: state_dir 在 StrataConfig 未公开字段之前硬编码到
-        # ~/.strata/state；Phase 6 后如需环境隔离再下沉为配置项。
-        self._persistence = PersistenceManager(_default_state_dir())
+        # CONVENTION: STRATA_STATE_DIR 环境变量仍保留作为测试隔离后门，
+        # 但生产路径优先使用 layout.checkpoint_dir（来自 config.paths）。
+        state_dir = _default_state_dir()
+        self._audit_logger = AuditLogger(config.audit_log)
+        self._persistence = PersistenceManager(state_dir)
         # CONVENTION: 生产路径下所有 grounding 组件由 Orchestrator 构造并注入
         # PrimitiveTaskExecutor；测试可直接传 executor 绕过构造链。
         if executor is None:
@@ -179,6 +183,9 @@ class AgentOrchestrator:
         self._context.clear()
         task_states: dict[str, TaskState] = {}
 
+        run_layout = self._prepare_run_layout(goal)
+        started_at = time.time()
+
         try:
             resumed = self._try_resume()
             if resumed is None:
@@ -204,41 +211,91 @@ class AgentOrchestrator:
                 graph = resumed
 
             task_states = self._execute(graph)
-            # Successful completion: clear checkpoint so next invocation
-            # starts fresh.
             self._persistence.clear_checkpoint()
-            return ExecutionResult(
-                final_state="COMPLETED",
+            final: GlobalState = "COMPLETED"
+            result = ExecutionResult(
+                final_state=final,
                 task_states=task_states,
                 error=None,
                 graph=graph,
             )
         except _OrchestratorAbort as abort:
-            # CONVENTION: FAILED 时保留 checkpoint（Q5 方案 a）以便下次 resume。
-            return ExecutionResult(
-                final_state="FAILED",
+            final = "FAILED"
+            result = ExecutionResult(
+                final_state=final,
                 task_states=abort.task_states,
                 error=abort.error,
                 graph=self._last_graph,
             )
         except StrataError as exc:
-            # Any unexpected strata error during the lifecycle ⇒ FAILED.
-            return ExecutionResult(
-                final_state="FAILED",
+            final = "FAILED"
+            result = ExecutionResult(
+                final_state=final,
                 task_states=task_states,
                 error=exc,
                 graph=self._last_graph,
             )
 
+        self._finalize_run(run_layout, goal, started_at, final)
+        return result
+
+    # ── run layout helpers ──
+
+    def _prepare_run_layout(self, goal: str) -> RunDirLayout | None:
+        """Create (or reuse injected) RunDirLayout for this run.
+
+        Returns ``None`` if layout creation fails (the run continues without
+        artefact directories — observability degrades, execution does not).
+        """
+        if self._layout is not None:
+            with contextlib.suppress(OSError):
+                self._layout.ensure_dirs()
+                self._layout.link_current()
+            return self._layout
+        try:
+            layout = RunDirLayout.create(self._config.paths, goal)
+            layout.ensure_dirs()
+            layout.link_current()
+            return layout
+        except Exception:
+            return None
+
+    def _finalize_run(
+        self,
+        layout: RunDirLayout | None,
+        goal: str,
+        started_at: float,
+        final_state: str,
+    ) -> None:
+        """Best-effort manifest write + GC after run_goal completes."""
+        if layout is None:
+            return
+        with contextlib.suppress(Exception):
+            layout.write_manifest(goal, {"final_state": final_state}, started_at)
+        if final_state == "COMPLETED":
+            with contextlib.suppress(Exception):
+                gc_old_runs(layout.run_root, self._config.paths.keep_last_runs)
+
     # ── lifecycle steps ──
 
     def _plan(self, goal: str) -> TaskGraph:
+        # CONVENTION: 把环境约束（OS / sandbox root / 只读路径）塞进 context，
+        # 让 LLM 避免规划出会被 SandboxGuard 拒绝的路径。否则 /tmp/* 类写入会
+        # 在执行阶段被拒，触发 REPLAN 回环（实测一个"create /tmp/x.txt"目标
+        # 要跑 2-3 轮 LLM 才能成功）。
+        plan_context: dict[str, object] = {
+            "os_type": self._config.osworld.os_type if self._config.osworld.enabled else "Linux",
+            "sandbox_enabled": self._config.sandbox.enabled,
+            "sandbox_root": self._config.sandbox.root,
+            "read_only_paths": list(self._config.sandbox.read_only_paths),
+        }
         try:
             graph = decompose_goal(
                 goal,
                 self._llm_router,
                 ACTION_VOCABULARY,
-                context={},
+                context=plan_context,
+                action_catalog=format_action_catalog_for_llm(),
             )
         except PlannerError as exc:
             self._fire("unrecoverable")
@@ -452,6 +509,7 @@ class AgentOrchestrator:
                 task.id,
                 failure_context,
                 self._llm_router,
+                action_catalog=format_action_catalog_for_llm(),
             )
             new_graph = apply_adjustment(self._last_graph, adjustment)
         except Exception:
@@ -507,6 +565,7 @@ class AgentOrchestrator:
                 failed_task.id,
                 failure_context,
                 self._llm_router,
+                action_catalog=format_action_catalog_for_llm(),
             )
         except Exception:
             return []

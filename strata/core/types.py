@@ -10,6 +10,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
+from strata.core.errors import SerializationError
+
 # ── Type aliases ──
 
 GlobalState = Literal[
@@ -93,11 +95,16 @@ class AppInfo:
 
 @dataclass(frozen=True)
 class CommandResult:
+    """Successful shell command outcome.
+
+    Timeouts and silence interruptions are signaled via
+    :class:`CommandTimeoutError` / :class:`SilenceTimeoutError`, not via fields
+    on this value object — exceptions are the single source of truth.
+    """
+
     stdout: str
     stderr: str
     returncode: int
-    timed_out: bool
-    interrupted_by_silence: bool
 
 
 @dataclass(frozen=True)
@@ -155,29 +162,39 @@ def task_node_to_dict(node: TaskNode) -> dict[str, object]:
 
 def task_node_from_dict(data: Mapping[str, object]) -> TaskNode:
     """Deserialize a TaskNode from a plain dict."""
-    raw_depends = data.get("depends_on", ())
-    depends_on: tuple[str, ...]
-    if isinstance(raw_depends, (list, tuple)):
-        depends_on = tuple(str(s) for s in raw_depends)
-    else:
-        depends_on = ()
+    try:
+        raw_depends = data.get("depends_on", ())
+        depends_on: tuple[str, ...]
+        if isinstance(raw_depends, (list, tuple)):
+            depends_on = tuple(str(s) for s in raw_depends)
+        else:
+            depends_on = ()
 
-    raw_params = data.get("params", {})
-    params = dict(raw_params) if isinstance(raw_params, dict) else {}
+        raw_params = data.get("params", {})
+        params = dict(raw_params) if isinstance(raw_params, dict) else {}
 
-    max_iter_raw = data.get("max_iterations")
-    max_iterations = int(max_iter_raw) if isinstance(max_iter_raw, (int, float)) else None
+        max_iter_raw = data.get("max_iterations")
+        max_iterations = int(max_iter_raw) if isinstance(max_iter_raw, (int, float)) else None
 
-    return TaskNode(
-        id=str(data["id"]),
-        task_type=str(data["task_type"]),  # type: ignore[arg-type]
-        action=str(data["action"]) if data.get("action") is not None else None,
-        params=params,
-        method=str(data["method"]) if data.get("method") is not None else None,
-        depends_on=depends_on,
-        output_var=str(data["output_var"]) if data.get("output_var") is not None else None,
-        max_iterations=max_iterations,
-    )
+        if "id" not in data:
+            raise SerializationError("TaskNode missing required key 'id'")
+        if "task_type" not in data:
+            raise SerializationError("TaskNode missing required key 'task_type'")
+
+        return TaskNode(
+            id=str(data["id"]),
+            task_type=str(data["task_type"]),  # type: ignore[arg-type]
+            action=str(data["action"]) if data.get("action") is not None else None,
+            params=params,
+            method=str(data["method"]) if data.get("method") is not None else None,
+            depends_on=depends_on,
+            output_var=(str(data["output_var"]) if data.get("output_var") is not None else None),
+            max_iterations=max_iterations,
+        )
+    except SerializationError:
+        raise
+    except (TypeError, ValueError) as e:
+        raise SerializationError(f"failed to deserialize TaskNode: {e}") from e
 
 
 def task_graph_to_dict(graph: TaskGraph) -> dict[str, object]:
@@ -194,22 +211,30 @@ def task_graph_to_dict(graph: TaskGraph) -> dict[str, object]:
 
 def task_graph_from_dict(data: Mapping[str, object]) -> TaskGraph:
     """Deserialize a TaskGraph from a plain dict."""
-    raw_tasks = data.get("tasks", ())
-    tasks: tuple[TaskNode, ...]
-    if isinstance(raw_tasks, (list, tuple)):
-        tasks = tuple(task_node_from_dict(t) for t in raw_tasks)
-    else:
-        tasks = ()
+    try:
+        if "goal" not in data:
+            raise SerializationError("TaskGraph missing required key 'goal'")
 
-    raw_methods = data.get("methods", {})
-    methods: dict[str, Sequence[TaskNode]] = {}
-    if isinstance(raw_methods, dict):
-        for name, subtask_list in raw_methods.items():
-            if isinstance(subtask_list, (list, tuple)):
-                methods[str(name)] = tuple(task_node_from_dict(t) for t in subtask_list)
+        raw_tasks = data.get("tasks", ())
+        tasks: tuple[TaskNode, ...]
+        if isinstance(raw_tasks, (list, tuple)):
+            tasks = tuple(task_node_from_dict(t) for t in raw_tasks)
+        else:
+            tasks = ()
 
-    return TaskGraph(
-        goal=str(data["goal"]),
-        tasks=tasks,
-        methods=methods,
-    )
+        raw_methods = data.get("methods", {})
+        methods: dict[str, Sequence[TaskNode]] = {}
+        if isinstance(raw_methods, dict):
+            for name, subtask_list in raw_methods.items():
+                if isinstance(subtask_list, (list, tuple)):
+                    methods[str(name)] = tuple(task_node_from_dict(t) for t in subtask_list)
+
+        return TaskGraph(
+            goal=str(data["goal"]),
+            tasks=tasks,
+            methods=methods,
+        )
+    except SerializationError:
+        raise
+    except (TypeError, ValueError) as e:
+        raise SerializationError(f"failed to deserialize TaskGraph: {e}") from e

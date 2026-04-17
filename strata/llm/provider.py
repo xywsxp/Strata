@@ -16,7 +16,12 @@ import icontract
 import openai
 
 from strata.core.config import LLMProviderConfig
-from strata.core.errors import LLMAPIError, LLMFeatureNotSupportedError
+from strata.core.errors import (
+    LLMAPIError,
+    LLMFeatureNotSupportedError,
+    LLMPermanentError,
+    LLMTransientError,
+)
 
 # ── Value objects ──
 
@@ -54,6 +59,38 @@ class LLMProvider(Protocol):
 
 
 # ── Concrete implementation ──
+
+
+def _classify_openai_error(exc: openai.APIError) -> LLMAPIError:
+    """Classify an OpenAI SDK exception as transient or permanent.
+
+    Transient (safe to retry):
+      * network / timeout failures
+      * rate-limit (429)
+      * server 5xx
+    Permanent (retry would not help):
+      * authentication / permission (401 / 403)
+      * bad request (400)
+      * unsupported / not-found (404)
+    """
+    transient_types = (
+        openai.APIConnectionError,
+        openai.APITimeoutError,
+        openai.RateLimitError,
+        openai.InternalServerError,
+    )
+    permanent_types = (
+        openai.AuthenticationError,
+        openai.PermissionDeniedError,
+        openai.NotFoundError,
+        openai.BadRequestError,
+        openai.UnprocessableEntityError,
+    )
+    if isinstance(exc, transient_types):
+        return LLMTransientError(f"transient LLM error: {exc}")
+    if isinstance(exc, permanent_types):
+        return LLMPermanentError(f"permanent LLM error: {exc}")
+    return LLMTransientError(f"unclassified OpenAI API error (retrying): {exc}")
 
 
 def _message_to_openai(msg: ChatMessage) -> dict[str, object]:
@@ -122,9 +159,9 @@ class OpenAICompatProvider:
                 response_format=response_format,
             )
         except openai.APIError as exc:
-            raise LLMAPIError(f"OpenAI API error: {exc}") from exc
+            raise _classify_openai_error(exc) from exc
         except Exception as exc:
-            raise LLMAPIError(f"LLM call failed: {exc}") from exc
+            raise LLMTransientError(f"LLM call failed: {exc}") from exc
 
         choice = response.choices[0]
         content = choice.message.content or ""

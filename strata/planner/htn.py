@@ -8,7 +8,7 @@ from typing import Final
 
 import icontract
 
-from strata.core.errors import PlannerError
+from strata.core.errors import LLMTransientError, PlannerError
 from strata.core.types import (
     TaskGraph,
     TaskNode,
@@ -163,9 +163,17 @@ def decompose_goal(
     router: LLMRouter,
     available_actions: Sequence[str],
     context: Mapping[str, object] | None = None,
+    action_catalog: str | None = None,
 ) -> TaskGraph:
-    """Decompose a natural-language goal into a TaskGraph using the planner LLM."""
-    actions_str = ", ".join(available_actions)
+    """Decompose a natural-language goal into a TaskGraph using the planner LLM.
+
+    Pass ``action_catalog`` when the caller has a richer, pre-formatted
+    description of each action's required / optional ``params`` keys (e.g.
+    :func:`strata.harness.actions.format_action_catalog_for_llm`). Without
+    it, the LLM only sees action names and will hallucinate parameter keys
+    (``"directory"`` instead of the contractual ``"path"``, etc.).
+    """
+    actions_str = action_catalog if action_catalog is not None else ", ".join(available_actions)
     context_str = json.dumps(dict(context), ensure_ascii=False) if context else "{}"
     user_prompt = DECOMPOSE_USER_TEMPLATE.format(
         goal=goal,
@@ -189,7 +197,7 @@ def decompose_goal(
             if graph.goal != goal:
                 graph = TaskGraph(goal=goal, tasks=graph.tasks, methods=graph.methods)
             return graph
-        except PlannerError as exc:
+        except (PlannerError, LLMTransientError) as exc:
             last_error = exc
             continue
 

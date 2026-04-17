@@ -23,7 +23,7 @@ from strata.grounding.terminal_handler import TerminalHandler
 from strata.grounding.vision_locator import VisionLocator
 from strata.harness.context import AuditLogger, ContextManager
 from strata.harness.recovery import RecoveryLevel, RecoveryPipeline
-from strata.harness.scheduler import LinearScheduler
+from strata.harness.scheduler import LinearRunner
 from strata.harness.state_machine import create_global_state_machine
 from strata.llm.provider import ChatResponse
 from strata.planner.htn import deserialize_graph, serialize_graph, validate_graph
@@ -37,8 +37,6 @@ class TestE2ETerminalCommand:
             stdout="hello\n",
             stderr="",
             returncode=0,
-            timed_out=False,
-            interrupted_by_silence=False,
         )
         config = TerminalConfig(
             command_timeout=30.0, silence_timeout=10.0, default_shell="/bin/bash"
@@ -90,7 +88,7 @@ class TestE2EScheduler:
             def execute(self, task: TaskNode, context: Mapping[str, object]) -> ActionResult:
                 return ActionResult(success=True)
 
-        scheduler = LinearScheduler(get_default_config())
+        scheduler = LinearRunner(get_default_config())
         results = scheduler.run(graph, _MockExecutor())
         assert len(results) == 3
         assert all(r.success for r in results.values())

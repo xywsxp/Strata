@@ -1,4 +1,8 @@
-"""Linear task scheduler with control-flow node interpretation."""
+"""Linear task runner with control-flow node interpretation.
+
+# CONVENTION: 重命名 LinearRunner — HTN 拓扑排序由 planner 层负责，本类仅线性
+# 消费已排序序列。原 LinearScheduler 名称暗示 DAG 拓扑调度，与实现不符。
+"""
 
 from __future__ import annotations
 
@@ -16,8 +20,14 @@ class TaskExecutor(Protocol):
     def execute(self, task: TaskNode, context: Mapping[str, object]) -> ActionResult: ...
 
 
-class LinearScheduler:
-    """Execute tasks in graph order, interpreting control-flow nodes."""
+class LinearRunner:
+    """Execute tasks in the order provided by :class:`TaskGraph.tasks`,
+    interpreting control-flow nodes (repeat / if_then / for_each).
+
+    Topological ordering (respecting ``depends_on`` and ``methods``) is the
+    responsibility of the planner layer that builds the TaskGraph; this
+    runner trusts the caller's ordering.
+    """
 
     def __init__(self, config: StrataConfig) -> None:
         self._max_loop = config.max_loop_iterations

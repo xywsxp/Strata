@@ -7,15 +7,21 @@ TaskGraph to the LLM, preventing context-window overflow.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, Literal
 
 import icontract
 
-from strata.core.errors import PlannerError
+from strata.core.errors import LLMTransientError, PlannerError
 from strata.core.types import TaskGraph, TaskNode, task_node_from_dict, task_node_to_dict
-from strata.harness.context import extract_local_context
+
+# CONVENTION: extract_local_context 是 planner 的上下文萃取工具，实现落在
+# harness.context 只是历史编排。若在模块顶层 import，会经过
+# strata.harness.__init__（Phase F 后聚合导出 AgentOrchestrator）→
+# AgentOrchestrator import adjuster → adjuster 尚未初始化，触发循环 import。
+# 改为函数内延迟 import 打破循环，不引入行为变化。
 from strata.llm.provider import ChatMessage
 from strata.llm.router import LLMRouter
 from strata.planner.htn import validate_graph
@@ -45,12 +51,21 @@ def adjust_plan(
     failed_task_id: str,
     failure_context: Mapping[str, object],
     router: LLMRouter,
+    action_catalog: str | None = None,
 ) -> Adjustment:
     """Generate a local adjustment for a failed task using topological pruning.
 
     Only the failed node, its siblings, and parent are sent to the LLM —
     never the full graph.
+
+    Pass ``action_catalog`` (e.g. :func:`format_action_catalog_for_llm`) so the
+    repair LLM knows the exact ``params`` keys each action demands; without it
+    the adjuster will hallucinate parameter names (``file_path`` instead of
+    ``path``) and the replacement plan will immediately trip
+    :class:`strata.core.errors.ActionParamsError`.
     """
+    from strata.harness.context import extract_local_context
+
     local_ctx = extract_local_context(graph, failed_task_id)
     existing_ids = {t.id for t in graph.tasks}
 
@@ -66,6 +81,7 @@ def adjust_plan(
         parent_id=local_ctx.parent_id or "none",
         failure_context_json=failure_context_json,
         existing_ids=", ".join(sorted(existing_ids)),
+        action_catalog=action_catalog or "(catalog unavailable — use generic action names)",
     )
 
     messages: list[ChatMessage] = [
@@ -78,13 +94,28 @@ def adjust_plan(
         try:
             response = router.plan(messages, json_mode=True, temperature=0.2)
             return _parse_adjustment(response.content, failed_task_id, existing_ids)
-        except PlannerError as exc:
+        except (PlannerError, LLMTransientError) as exc:
             last_error = exc
             continue
 
     raise PlannerError(
         f"failed to adjust plan after {_MAX_ADJUST_RETRIES + 1} attempts: {last_error}"
     )
+
+
+_MARKDOWN_FENCE = re.compile(r"^\s*```(?:json|JSON)?\s*\n?(.*?)\n?\s*```\s*$", re.DOTALL)
+
+
+def _strip_markdown_fence(raw: str) -> str:
+    """Strip a ``\\`\\`\\`json ... \\`\\`\\``` fence if present.
+
+    Some providers wrap JSON output in markdown fences even when json_mode is
+    requested. Strip before parsing; non-fenced input passes through.
+    """
+    match = _MARKDOWN_FENCE.match(raw)
+    if match:
+        return match.group(1)
+    return raw
 
 
 def _parse_adjustment(
@@ -94,7 +125,7 @@ def _parse_adjustment(
 ) -> Adjustment:
     """Parse LLM response into an Adjustment, validating constraints."""
     try:
-        data = json.loads(raw_json)
+        data = json.loads(_strip_markdown_fence(raw_json))
     except json.JSONDecodeError as exc:
         raise PlannerError(f"invalid JSON from LLM: {exc}") from exc
 

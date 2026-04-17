@@ -1,9 +1,14 @@
-"""Terminal command handler — wraps ITerminalAdapter with prompt tokens and sudo sanitization."""
+"""Terminal command handler — wraps ITerminalAdapter with sudo sanitization.
+
+The underlying PTY adapter embeds its own exit-code token, so this handler is
+deliberately thin: it only enforces the ``sudo -n`` rule via a shell-lex aware
+check on the first token. Regex-based rewriting is avoided because it ignores
+shell word boundaries (e.g. ``"sudo"`` inside a quoted string literal).
+"""
 
 from __future__ import annotations
 
-import re
-import uuid
+import shlex
 
 import icontract
 
@@ -13,7 +18,7 @@ from strata.env.protocols import ITerminalAdapter
 
 
 class TerminalHandler:
-    """Wraps terminal adapter with prompt-token exit code capture and sudo handling."""
+    """Wraps terminal adapter with sudo-safety sanitization."""
 
     def __init__(self, terminal: ITerminalAdapter, config: TerminalConfig) -> None:
         self._terminal = terminal
@@ -22,7 +27,7 @@ class TerminalHandler:
     @icontract.require(lambda command: len(command.strip()) > 0, "command must be non-empty")
     @icontract.ensure(lambda result: isinstance(result.returncode, int), "returncode must be int")
     def execute_command(self, command: str, cwd: str | None = None) -> CommandResult:
-        """Execute a command via the terminal adapter."""
+        """Execute *command* via the terminal adapter after sudo sanitization."""
         sanitized = self._sanitize_sudo(command)
         return self._terminal.run_command(
             sanitized,
@@ -31,17 +36,19 @@ class TerminalHandler:
             silence_timeout=self._config.silence_timeout,
         )
 
-    def _wrap_command(self, command: str) -> str:
-        """Add a unique prompt token for exit code extraction."""
-        token = f"AGENT_DONE_{uuid.uuid4().hex[:12]}"
-        return f"{command}; echo '{token}' $?"
-
-    @icontract.ensure(
-        lambda command, result: (
-            "sudo" not in command or "sudo -n" in result or "sudo" not in result
-        ),
-        "sudo commands must have -n flag",
-    )
     def _sanitize_sudo(self, command: str) -> str:
-        """Ensure all sudo invocations use -n (non-interactive)."""
-        return re.sub(r"\bsudo\b(?!\s+-n)", "sudo -n", command)
+        """Ensure a leading ``sudo`` invocation always uses ``-n``.
+
+        Uses ``shlex`` tokenization so that ``sudo`` appearing inside a quoted
+        argument (e.g. ``echo 'sudo rm -rf /'``) is left untouched. Only the
+        first shell word of the command is inspected.
+        """
+        try:
+            tokens = shlex.split(command, posix=True)
+        except ValueError:
+            return command
+        if not tokens or tokens[0] != "sudo":
+            return command
+        if len(tokens) >= 2 and tokens[1] == "-n":
+            return command
+        return "sudo -n " + command[len("sudo") :].lstrip()

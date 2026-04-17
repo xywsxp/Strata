@@ -8,21 +8,40 @@ from pathlib import Path
 
 import pytest
 
-from strata.core.errors import EnvironmentError as StrataEnvironmentError
+from strata.core.errors import StrataEnvironmentError
 
 _HAS_CLIPBOARD = shutil.which("xclip") is not None or shutil.which("xsel") is not None
 
 
-class TestInitFailsWithoutClipboard:
-    @pytest.mark.skipif(_HAS_CLIPBOARD, reason="clipboard tool is available")
-    def test_no_clipboard_tool_raises(self) -> None:
+class TestConstructionDoesNotRequireClipboard:
+    def test_construction_succeeds_without_clipboard_tool(self) -> None:
+        """# CONVENTION: ctor is lazy — clipboard tool lookup deferred to
+        the first clipboard call so headless / OSWorld setups can build the
+        bundle even without xclip/xsel installed."""
         from strata.env.linux.system import LinuxSystemAdapter
 
+        adapter = LinuxSystemAdapter()
+        assert adapter is not None
+
+
+class TestClipboardCallFailsWithoutTool:
+    @pytest.mark.skipif(_HAS_CLIPBOARD, reason="clipboard tool is available")
+    def test_get_clipboard_without_tool_raises(self) -> None:
+        from strata.env.linux.system import LinuxSystemAdapter
+
+        adapter = LinuxSystemAdapter()
         with pytest.raises(StrataEnvironmentError, match="clipboard tool not found"):
-            LinuxSystemAdapter()
+            adapter.get_clipboard_text()
+
+    @pytest.mark.skipif(_HAS_CLIPBOARD, reason="clipboard tool is available")
+    def test_set_clipboard_without_tool_raises(self) -> None:
+        from strata.env.linux.system import LinuxSystemAdapter
+
+        adapter = LinuxSystemAdapter()
+        with pytest.raises(StrataEnvironmentError, match="clipboard tool not found"):
+            adapter.set_clipboard_text("foo")
 
 
-@pytest.mark.skipif(not _HAS_CLIPBOARD, reason="no clipboard tool installed")
 class TestEnvVarRoundtrip:
     def test_set_get_env(self) -> None:
         from strata.env.linux.system import LinuxSystemAdapter
@@ -33,7 +52,6 @@ class TestEnvVarRoundtrip:
         os.environ.pop("_STRATA_TEST_VAR", None)
 
 
-@pytest.mark.skipif(not _HAS_CLIPBOARD, reason="no clipboard tool installed")
 class TestCwdRoundtrip:
     def test_set_get_cwd(self, tmp_path: Path) -> None:
         from strata.env.linux.system import LinuxSystemAdapter
