@@ -88,3 +88,49 @@ class TestLiveVisionProvider:
         except Exception as exc:
             pytest.skip(f"vision provider {provider_name!r} rejected image: {exc}")
         assert isinstance(response.content, str)
+
+
+class TestHealthCheckLive:
+    def test_health_check_all_providers_pass(self, repo_config: StrataConfig) -> None:
+        """All configured providers must pass health check with real API keys."""
+        from strata.health import check_llm_providers
+
+        statuses = check_llm_providers(repo_config)
+        for s in statuses:
+            assert s.ok, f"{s.component} failed: {s.detail}"
+            assert s.latency_ms > 0
+
+
+class TestRouterLive:
+    def test_router_plan_roundtrip(self, repo_config: StrataConfig) -> None:
+        """The planner role must return a non-empty response via LLMRouter."""
+        from strata.llm.router import LLMRouter
+
+        router = LLMRouter(repo_config)
+        messages = [ChatMessage(role="user", content="Reply with: OK")]
+        response = router.plan(messages, temperature=0.0, max_tokens=10)
+        assert len(response.content) > 0
+        assert response.usage.get("prompt_tokens", 0) > 0
+
+    def test_router_see_with_screenshot(self, repo_config: StrataConfig) -> None:
+        """The vision role must accept an image and return content."""
+        from strata.llm.router import LLMRouter
+
+        router = LLMRouter(repo_config)
+        tiny_png = bytes.fromhex(
+            "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+            "0000000d49444154789c626001000000050001a5f6f3ef0000000049454e44ae"
+            "426082"
+        )
+        messages = [
+            ChatMessage(
+                role="user",
+                content="Describe this image briefly.",
+                images=(tiny_png,),
+            ),
+        ]
+        try:
+            response = router.see(messages, temperature=0.0, max_tokens=50)
+        except Exception as exc:
+            pytest.skip(f"vision role rejected image: {exc}")
+        assert len(response.content) > 0

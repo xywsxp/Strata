@@ -98,6 +98,50 @@ def _run_shell_host(command: str, timeout: float) -> ShellResult:
         return ShellResult(stdout="", stderr="timeout", returncode=-1)
 
 
+def _run_shell_osworld(command: str, server_url: str, timeout: float) -> ShellResult:
+    """Run a shell command inside the OSWorld container via POST /execute."""
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    base = server_url.rstrip("/")
+    payload = _json.dumps({"command": command, "shell": True}).encode("utf-8")
+    req = urllib.request.Request(
+        base + "/execute",
+        data=payload,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = _json.loads(resp.read())
+        output = str(body.get("output", ""))
+        rc = int(body.get("returncode", body.get("exit_code", 0)))
+        return ShellResult(stdout=output, stderr="", returncode=rc)
+    except urllib.error.URLError as exc:
+        return ShellResult(stdout="", stderr=f"OSWorld connection error: {exc}", returncode=-1)
+    except Exception as exc:
+        return ShellResult(stdout="", stderr=f"{type(exc).__name__}: {exc}", returncode=-1)
+
+
+def _run_shell(
+    target: str,
+    command: str,
+    timeout: float,
+    server_url: str = "",
+) -> ShellResult:
+    """Dispatch to host or osworld shell."""
+    if target == "osworld":
+        if not server_url:
+            return ShellResult(
+                stdout="",
+                stderr="target=osworld but no server_url configured",
+                returncode=-1,
+            )
+        return _run_shell_osworld(command, server_url, timeout)
+    return _run_shell_host(command, timeout)
+
+
 # ── Task report ──
 
 
@@ -128,10 +172,12 @@ def _run_single(
     verify_out: str | None = None
     run_dir = ""
 
+    server_url = cfg.osworld.server_url if cfg.osworld.enabled else ""
+
     # ── setup ──
     if task.setup:
         for cmd in task.setup.commands:
-            sr = _run_shell_host(cmd, timeout=30.0)
+            sr = _run_shell(task.setup.target, cmd, timeout=30.0, server_url=server_url)
             setup_out = (setup_out or "") + sr.stdout + sr.stderr
             if sr.returncode != 0:
                 return TaskReport(
@@ -175,7 +221,9 @@ def _run_single(
 
     # ── verify ──
     if task.verify:
-        vr = _run_shell_host(task.verify.command, timeout=30.0)
+        vr = _run_shell(
+            task.verify.target, task.verify.command, timeout=30.0, server_url=server_url
+        )
         verify_out = vr.stdout
 
         if (

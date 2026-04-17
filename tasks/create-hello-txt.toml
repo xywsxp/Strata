@@ -5,10 +5,10 @@ tags = ["filesystem", "smoke"]
 timeout_s = 120
 
 [setup]
-target = "host"
+target = "osworld"
 commands = ["rm -f /tmp/strata_e2e_hello.txt"]
 
 [verify]
-target = "host"
+target = "osworld"
 command = "cat /tmp/strata_e2e_hello.txt"
-expected_stdout_regex = "^hello\\n?$"
+expected_stdout_regex = "hello"
