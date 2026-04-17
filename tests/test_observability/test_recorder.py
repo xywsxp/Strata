@@ -102,9 +102,7 @@ class TestOSWorldFFmpegRecorder:
         assert mp4_path.read_bytes() == b""
 
     @patch("strata.observability.recorder._OSWorldHTTPClient")
-    def test_keyframe_writes_png(
-        self, mock_client_cls: MagicMock, tmp_path: Path
-    ) -> None:
+    def test_keyframe_writes_png(self, mock_client_cls: MagicMock, tmp_path: Path) -> None:
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
         fake_png = b"\x89PNG_screenshot_data"
@@ -119,9 +117,7 @@ class TestOSWorldFFmpegRecorder:
         assert (screenshots_dir / "step_0001_pre.png").read_bytes() == fake_png
 
     @patch("strata.observability.recorder._OSWorldHTTPClient")
-    def test_note_event_appends_to_events(
-        self, mock_client_cls: MagicMock, tmp_path: Path
-    ) -> None:
+    def test_note_event_appends_to_events(self, mock_client_cls: MagicMock, tmp_path: Path) -> None:
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
         mock_client.post_json.return_value = {"status": "success"}

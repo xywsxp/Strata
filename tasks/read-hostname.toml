@@ -1,0 +1,10 @@
+[task]
+id = "read-hostname"
+goal = "Read the file /etc/hostname and report its contents"
+tags = ["filesystem", "smoke"]
+timeout_s = 120
+
+[verify]
+target = "host"
+command = "cat /etc/hostname"
+expected_exit_code = 0

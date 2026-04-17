@@ -134,9 +134,7 @@ class AgentOrchestrator:
         # CONVENTION: llm_router 可选注入 —— 生产路径由 __main__ 构造一次；
         # 测试可传 mock 免去 OpenAI 客户端构造的网络依赖。
         self._llm_router = (
-            llm_router
-            if llm_router is not None
-            else LLMRouter(config, sink=transcript_sink)
+            llm_router if llm_router is not None else LLMRouter(config, sink=transcript_sink)
         )
         self._context = ContextManager(config.memory)
         state_dir = _default_state_dir()
