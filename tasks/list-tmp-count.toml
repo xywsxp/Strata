@@ -1,0 +1,5 @@
+[task]
+id = "list-tmp-count"
+goal = "List the contents of the /tmp directory and report the count of entries"
+tags = ["filesystem", "smoke"]
+timeout_s = 120

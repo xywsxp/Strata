@@ -1,0 +1,34 @@
+---
+description: 从 FV 执行计划文档执行 Phase/Step：Write→Review 循环直到 LGTM，熔断后分支/提交/推送。配合 FV_EXECUTION_PLAN.md 使用。
+alwaysApply: false
+---
+
+> **用法**：`@` 引用执行计划文档（如 `@FV_EXECUTION_PLAN.md`），然后发送此 prompt。
+
+读取计划，从 Phase 1 Step 1.1 自动点火，串行执行每个 Step：
+
+## Step 执行循环
+
+对每个 Step：
+
+1. **Write**：按计划传入上下文（`__init__.py` + 领域模型 + 待改文件 + `tests/strategies.py`）+ 所有历次 Review 失败反馈，执行 `fv-writer` 规则。
+2. **Review**：传入变更文件 + `__init__.py` + 领域模型 + `tests/strategies.py`，执行 `fv-reviewer` 规则。
+3. Reviewer 输出 `LGTM` → 进入下一 Step。
+4. Reviewer 输出 FAIL → 累积反馈，Writer 重试（上限 3 次）。
+5. 3 次仍失败 → **熔断**：停止，输出失败历史摘要，提示人类介入（建议 `git diff` 查看脏状态，必要时 `git checkout -- .` 回滚）。
+
+## Phase 完成协议
+
+所有 Step LGTM 后，**不得跳过任何步骤**：
+
+1. `uv run mypy --strict . && uv run pytest --tb=short -q && uv run ruff check . && uv run ruff format --check .`（全绿才继续）
+2. `git checkout -b phase/<N>-<slug>`
+3. `git add -A && git commit -m "feat(phase-<N>): <目标>\n\nSteps: ...\nVerification: mypy clean | contracts pass | hypothesis pass | pytest all green | ruff 0 warnings"`
+4. `git push -u origin HEAD`
+5. 直接继续下一 Phase，不暂停等待 ACK。
+
+**回滚**：若熔断，上一已推送分支 `phase/<N-1>-<slug>` 为稳定基线。
+
+## 完成
+
+所有 Phase 推送完毕后，输出 Phase/分支/状态汇总表，提示人类审阅并告知是否合并。

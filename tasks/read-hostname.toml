@@ -1,0 +1,11 @@
+[task]
+id = "read-hostname"
+goal = "Read the file /etc/hostname and report its contents"
+tags = ["filesystem", "smoke"]
+timeout_s = 120
+
+# CONVENTION: agent 的 execute_command 通过 PTYTerminalAdapter 在宿主机执行
+[verify]
+target = "host"
+command = "cat /etc/hostname"
+expected_exit_code = 0

@@ -1,0 +1,23 @@
+# ── Strata 评测题目模板 ──
+# 复制此文件并重命名为 <kebab-case-id>.toml，放在 tasks/ 目录下。
+
+[task]
+id = "my-task-id"                        # 必填，kebab-case，不超过 63 字符
+goal = "自然语言目标描述"                  # 必填，传给 agent 的 goal 文本
+tags = ["smoke"]                         # 可选，用于 --tag 筛选
+timeout_s = 120                          # 整个 goal 的墙钟上限（秒）
+# max_iterations = 20                   # 可选，覆盖 config.max_loop_iterations
+
+# ── 可选：运行前初始化 ──
+# [setup]
+# target = "host"                       # "host"（本机 shell）或 "osworld"（容器内）
+# commands = [
+#   "rm -f /tmp/my-file.txt",
+# ]
+
+# ── 可选：运行后校验 ──
+# [verify]
+# target = "host"
+# command = "cat /tmp/my-file.txt"
+# expected_stdout_regex = "^hello$"     # 至少提供 regex 或 exit_code 之一
+# expected_exit_code = 0

@@ -1,0 +1,19 @@
+[task]
+id = "gui-type-in-terminal"
+goal = """Using ONLY GUI actions (locate_and_click, type_text, press_key), \
+perform the following steps on the Ubuntu desktop:
+1. Click on the text input area inside the terminal window (the dark area where the command prompt $ is visible, NOT the title bar)
+2. Type the command: echo gui-test-ok > /tmp/strata_gui_test.txt
+3. Press the Enter key to execute the command
+Do NOT use execute_command or write_file — this task tests GUI interaction only."""
+tags = ["gui", "smoke"]
+timeout_s = 180
+
+[setup]
+target = "osworld"
+commands = ["rm -f /tmp/strata_gui_test.txt"]
+
+[verify]
+target = "osworld"
+command = "cat /tmp/strata_gui_test.txt"
+expected_stdout_regex = "gui-test-ok"
