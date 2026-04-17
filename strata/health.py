@@ -45,7 +45,11 @@ def check_llm_providers(config: StrataConfig) -> Sequence[HealthStatus]:
         t0 = time.monotonic()
         try:
             provider = OpenAICompatProvider(prov_config)
-            provider.chat([ping_msg], temperature=0.0, max_tokens=50)
+            # CONVENTION: temperature=1.0 — most OpenAI-compatible providers
+            # accept 1.0; kimi-k2.5 only allows temperature=1; temperature=0
+            # is rejected by some providers and triggers empty-content on
+            # reasoning models.
+            provider.chat([ping_msg], temperature=1.0, max_tokens=50)
             latency = (time.monotonic() - t0) * 1000
             statuses.append(
                 HealthStatus(
