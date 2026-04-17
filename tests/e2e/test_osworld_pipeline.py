@@ -3,7 +3,7 @@
 Verifies that production ``config.toml`` + :class:`EnvironmentFactory` +
 :class:`OSWorldGUIAdapter` + :class:`IGUIAdapter` compose correctly when
 ``osworld.enabled=true``. The OSWorld Docker server's HTTP surface is
-mocked (``_OSWorldHTTPClient``) so tests run fast and do not require a
+mocked (``OSWorldHTTPClient``) so tests run fast and do not require a
 running container.
 
 Separately, the ``@pytest.mark.integration`` suite connects to a real
@@ -81,7 +81,7 @@ class TestFactoryDispatchOnLiveConfig:
             pytest.skip("Linux-only stub guard")
         osw = dataclasses.replace(repo_config.osworld, enabled=False)
         cfg = dataclasses.replace(repo_config, osworld=osw)
-        with pytest.raises(UnsupportedPlatformError, match="Linux native GUI"):
+        with pytest.raises(UnsupportedPlatformError, match="Native Linux GUI"):
             EnvironmentFactory.create(cfg)
 
 
@@ -100,7 +100,7 @@ class TestFactoryOSWorldBranchWithMockedHTTP:
             else {"status": "success"}
         )
         client.get_bytes.return_value = screenshot_png or _png_bytes(screen, (128, 128, 128))
-        patcher = patch("strata.env.gui_osworld._OSWorldHTTPClient", return_value=client)
+        patcher = patch("strata.env.gui_osworld.OSWorldHTTPClient", return_value=client)
         patcher.start()
         return client, patcher
 

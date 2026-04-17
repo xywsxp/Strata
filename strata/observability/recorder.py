@@ -1,12 +1,15 @@
 """Trajectory recorder — dual-track: in-container ffmpeg + keyframe PNGs.
 
 ``TrajectoryRecorder`` is the Protocol. ``OSWorldFFmpegRecorder`` spawns
-``ffmpeg x11grab`` inside the OSWorld container via ``/run_python``, then
-downloads the mp4 via ``POST /file`` (form-encoded). ``NullRecorder`` is
-the no-op fallback for non-OSWorld environments.
+``ffmpeg x11grab`` inside a remote machine via ``RemoteCodeRunner``, then
+downloads the mp4. ``NullRecorder`` is the no-op fallback.
 
 Events (task state changes, etc.) are appended to ``events.jsonl`` for
 subtitle overlay / timeline reconstruction.
+
+# CONVENTION: recorder does NOT import strata.env.* — all remote I/O
+# is injected via RemoteCodeRunner Protocol, cutting the observability→env
+# reverse dependency.
 """
 
 from __future__ import annotations
@@ -22,12 +25,19 @@ from typing import Protocol, runtime_checkable
 
 import icontract
 
-from strata.core.config import OSWorldConfig
 from strata.core.errors import OSWorldConnectionError
-from strata.env.gui_osworld import _OSWorldHTTPClient
 
 _SAFE_RUN_ID = re.compile(r"^[a-zA-Z0-9_-]+$")
 _MAX_CONSECUTIVE_FAILURES = 3
+
+
+@runtime_checkable
+class RemoteCodeRunner(Protocol):
+    """Minimal contract for running code / downloading files from a remote machine."""
+
+    def post_json(self, path: str, payload: dict[str, object]) -> dict[str, object]: ...
+    def post_form_get_bytes(self, path: str, fields: dict[str, str]) -> bytes: ...
+    def get_bytes(self, path: str) -> bytes: ...
 
 
 @runtime_checkable
@@ -57,23 +67,24 @@ class NullRecorder:
 
 
 class OSWorldFFmpegRecorder:
-    """In-container ffmpeg x11grab recorder with form-encoded file download."""
+    """In-container ffmpeg x11grab recorder via RemoteCodeRunner injection."""
 
-    @icontract.require(lambda osworld_config: osworld_config.enabled)
     @icontract.require(lambda fps: 1 <= fps <= 60)
+    @icontract.require(
+        lambda screen_size: screen_size[0] > 0 and screen_size[1] > 0,
+        "screen_size must be positive",
+    )
     def __init__(
         self,
-        osworld_config: OSWorldConfig,
+        runner: RemoteCodeRunner,
+        screen_size: tuple[int, int],
         out_dir: Path,
         fps: int = 30,
     ) -> None:
-        self._config = osworld_config
+        self._runner = runner
+        self._screen_w, self._screen_h = screen_size
         self._out_dir = out_dir
         self._fps = fps
-        self._client = _OSWorldHTTPClient(
-            base_url=osworld_config.server_url,
-            timeout=osworld_config.request_timeout,
-        )
         self._started = False
         self._run_id = ""
         self._failures = 0
@@ -89,7 +100,7 @@ class OSWorldFFmpegRecorder:
             return
         self._run_id = run_id
         self._events = []
-        w, h = self._config.screen_size
+        w, h = self._screen_w, self._screen_h
         try:
             self._exec_remote(
                 "import subprocess, os\n"
@@ -129,7 +140,7 @@ class OSWorldFFmpegRecorder:
                 "except Exception:\n"
                 "    pass\n"
             )
-            mp4_bytes = self._client.post_form_get_bytes(
+            mp4_bytes = self._runner.post_form_get_bytes(
                 "/file",
                 {"file_path": f"/tmp/strata_rec/{self._run_id}.mp4"},
             )
@@ -153,7 +164,7 @@ class OSWorldFFmpegRecorder:
         if self._disabled:
             return
         try:
-            png = self._client.get_bytes("/screenshot")
+            png = self._runner.get_bytes("/screenshot")
             self._out_dir.mkdir(parents=True, exist_ok=True)
             screenshots_dir = self._out_dir.parent / "screenshots"
             screenshots_dir.mkdir(parents=True, exist_ok=True)
@@ -171,7 +182,7 @@ class OSWorldFFmpegRecorder:
         self._events.append(entry)
 
     def _exec_remote(self, code: str) -> None:
-        self._client.post_json("/run_python", {"code": code})
+        self._runner.post_json("/run_python", {"code": code})
 
     def _write_events_jsonl(self) -> None:
         if not self._events:

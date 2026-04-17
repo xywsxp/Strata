@@ -57,7 +57,6 @@ from strata.harness.state_machine import (
 from strata.llm.router import LLMRouter
 from strata.observability.recorder import (
     NullRecorder,
-    OSWorldFFmpegRecorder,
     TrajectoryRecorder,
 )
 from strata.observability.transcript import ChatTranscriptSink
@@ -282,14 +281,24 @@ class AgentOrchestrator:
         """Return the active recorder for this run.
 
         Priority: injected > auto-constructed (if OSWorld enabled) > NullRecorder.
+        Recorder construction is delegated to callers via __init__ injection;
+        orchestrator no longer imports OSWorldFFmpegRecorder directly.
         """
         if self._recorder is not None:
             return self._recorder
         if layout is not None and self._config.osworld.enabled:
             try:
+                from strata.env.osworld_client import OSWorldHTTPClient
+                from strata.observability.recorder import OSWorldFFmpegRecorder
+
+                runner = OSWorldHTTPClient(
+                    base_url=self._config.osworld.server_url,
+                    timeout=self._config.osworld.request_timeout,
+                )
                 return OSWorldFFmpegRecorder(
-                    self._config.osworld,
-                    layout.recordings_dir,
+                    runner=runner,
+                    screen_size=self._config.osworld.screen_size,
+                    out_dir=layout.recordings_dir,
                     fps=30,
                 )
             except Exception:
@@ -314,13 +323,22 @@ class AgentOrchestrator:
 
     # ── lifecycle steps ──
 
+    def _resolve_os_type(self) -> str:
+        """Return OS type for plan context.
+
+        OSWorld enabled → config.osworld.os_type; else → platform.system().
+        """
+        if self._config.osworld.enabled:
+            return self._config.osworld.os_type
+        import platform
+
+        return platform.system() or "Linux"
+
     def _plan(self, goal: str) -> TaskGraph:
         # CONVENTION: 把环境约束（OS / sandbox root / 只读路径）塞进 context，
-        # 让 LLM 避免规划出会被 SandboxGuard 拒绝的路径。否则 /tmp/* 类写入会
-        # 在执行阶段被拒，触发 REPLAN 回环（实测一个"create /tmp/x.txt"目标
-        # 要跑 2-3 轮 LLM 才能成功）。
+        # 让 LLM 避免规划出会被 SandboxGuard 拒绝的路径。
         plan_context: dict[str, object] = {
-            "os_type": self._config.osworld.os_type if self._config.osworld.enabled else "Linux",
+            "os_type": self._resolve_os_type(),
             "sandbox_enabled": self._config.sandbox.enabled,
             "sandbox_root": self._config.sandbox.root,
             "read_only_paths": list(self._config.sandbox.read_only_paths),

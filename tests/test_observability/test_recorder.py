@@ -4,32 +4,28 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import icontract
 import pytest
 
-from strata.core.config import OSWorldConfig
 from strata.core.errors import OSWorldConnectionError
 from strata.observability.recorder import (
     NullRecorder,
     OSWorldFFmpegRecorder,
+    RemoteCodeRunner,
     TrajectoryRecorder,
 )
 
+_SCREEN = (1920, 1080)
 
-def _osworld_config() -> OSWorldConfig:
-    return OSWorldConfig(
-        enabled=True,
-        provider="docker",
-        os_type="Ubuntu",
-        screen_size=(1920, 1080),
-        headless=True,
-        action_space="pyautogui",
-        docker_image=None,
-        server_url="http://localhost:5000",
-        request_timeout=10.0,
-    )
+
+def _mock_runner() -> MagicMock:
+    runner = MagicMock(spec=RemoteCodeRunner)
+    runner.post_json.return_value = {"status": "success"}
+    runner.post_form_get_bytes.return_value = b"fake-mp4"
+    runner.get_bytes.return_value = b"\x89PNG_data"
+    return runner
 
 
 class TestNullRecorder:
@@ -46,53 +42,30 @@ class TestNullRecorder:
 
 
 class TestOSWorldFFmpegRecorder:
-    @patch("strata.observability.recorder._OSWorldHTTPClient")
-    def test_start_spawns_ffmpeg_via_run_python(
-        self, mock_client_cls: MagicMock, tmp_path: Path
-    ) -> None:
-        mock_client = MagicMock()
-        mock_client_cls.return_value = mock_client
-        mock_client.post_json.return_value = {"status": "success"}
-
-        rec = OSWorldFFmpegRecorder(_osworld_config(), tmp_path / "rec", fps=30)
-        rec._client = mock_client
+    def test_start_spawns_ffmpeg_via_run_python(self, tmp_path: Path) -> None:
+        runner = _mock_runner()
+        rec = OSWorldFFmpegRecorder(runner, _SCREEN, tmp_path / "rec", fps=30)
         rec.start("test-run-id")
 
-        calls = [str(c) for c in mock_client.post_json.call_args_list]
-        ffmpeg_found = any("ffmpeg" in c for c in calls)
-        assert ffmpeg_found
+        calls = [str(c) for c in runner.post_json.call_args_list]
+        assert any("ffmpeg" in c for c in calls)
 
-    @patch("strata.observability.recorder._OSWorldHTTPClient")
-    def test_stop_sends_sigint_and_downloads_mp4(
-        self, mock_client_cls: MagicMock, tmp_path: Path
-    ) -> None:
-        mock_client = MagicMock()
-        mock_client_cls.return_value = mock_client
-        mock_client.post_json.return_value = {"status": "success"}
-        mock_client.post_form_get_bytes.return_value = b"fake-mp4-data"
-
-        rec = OSWorldFFmpegRecorder(_osworld_config(), tmp_path / "rec", fps=30)
-        rec._client = mock_client
+    def test_stop_sends_sigint_and_downloads_mp4(self, tmp_path: Path) -> None:
+        runner = _mock_runner()
+        rec = OSWorldFFmpegRecorder(runner, _SCREEN, tmp_path / "rec", fps=30)
         rec._started = True
         rec._run_id = "test-run"
         rec.stop()
 
-        mock_client.post_form_get_bytes.assert_called_once()
+        runner.post_form_get_bytes.assert_called_once()
         mp4_path = tmp_path / "rec" / "osworld.mp4"
         assert mp4_path.exists()
-        assert mp4_path.read_bytes() == b"fake-mp4-data"
+        assert mp4_path.read_bytes() == b"fake-mp4"
 
-    @patch("strata.observability.recorder._OSWorldHTTPClient")
-    def test_stop_writes_empty_mp4_on_http_error(
-        self, mock_client_cls: MagicMock, tmp_path: Path
-    ) -> None:
-        mock_client = MagicMock()
-        mock_client_cls.return_value = mock_client
-        mock_client.post_json.return_value = {"status": "success"}
-        mock_client.post_form_get_bytes.side_effect = OSWorldConnectionError("timeout")
-
-        rec = OSWorldFFmpegRecorder(_osworld_config(), tmp_path / "rec", fps=30)
-        rec._client = mock_client
+    def test_stop_writes_empty_mp4_on_http_error(self, tmp_path: Path) -> None:
+        runner = _mock_runner()
+        runner.post_form_get_bytes.side_effect = OSWorldConnectionError("timeout")
+        rec = OSWorldFFmpegRecorder(runner, _SCREEN, tmp_path / "rec", fps=30)
         rec._started = True
         rec._run_id = "test-run"
         rec.stop()
@@ -101,30 +74,18 @@ class TestOSWorldFFmpegRecorder:
         assert mp4_path.exists()
         assert mp4_path.read_bytes() == b""
 
-    @patch("strata.observability.recorder._OSWorldHTTPClient")
-    def test_keyframe_writes_png(self, mock_client_cls: MagicMock, tmp_path: Path) -> None:
-        mock_client = MagicMock()
-        mock_client_cls.return_value = mock_client
-        fake_png = b"\x89PNG_screenshot_data"
-        mock_client.get_bytes.return_value = fake_png
-
+    def test_keyframe_writes_png(self, tmp_path: Path) -> None:
+        runner = _mock_runner()
         rec_dir = tmp_path / "rec"
-        rec = OSWorldFFmpegRecorder(_osworld_config(), rec_dir, fps=30)
-        rec._client = mock_client
+        rec = OSWorldFFmpegRecorder(runner, _SCREEN, rec_dir, fps=30)
         rec.note_keyframe("step_0001_pre")
 
         screenshots_dir = rec_dir.parent / "screenshots"
-        assert (screenshots_dir / "step_0001_pre.png").read_bytes() == fake_png
+        assert (screenshots_dir / "step_0001_pre.png").read_bytes() == b"\x89PNG_data"
 
-    @patch("strata.observability.recorder._OSWorldHTTPClient")
-    def test_note_event_appends_to_events(self, mock_client_cls: MagicMock, tmp_path: Path) -> None:
-        mock_client = MagicMock()
-        mock_client_cls.return_value = mock_client
-        mock_client.post_json.return_value = {"status": "success"}
-        mock_client.post_form_get_bytes.return_value = b"mp4"
-
-        rec = OSWorldFFmpegRecorder(_osworld_config(), tmp_path / "rec", fps=30)
-        rec._client = mock_client
+    def test_note_event_appends_to_events(self, tmp_path: Path) -> None:
+        runner = _mock_runner()
+        rec = OSWorldFFmpegRecorder(runner, _SCREEN, tmp_path / "rec", fps=30)
         rec._started = True
         rec._run_id = "test"
 
@@ -140,33 +101,31 @@ class TestOSWorldFFmpegRecorder:
         assert e0["kind"] == "task_state"
 
     def test_refuses_unsafe_run_id(self, tmp_path: Path) -> None:
-        with patch("strata.observability.recorder._OSWorldHTTPClient"):
-            rec = OSWorldFFmpegRecorder(_osworld_config(), tmp_path / "rec", fps=30)
-            with pytest.raises(icontract.ViolationError):
-                rec.start("bad;id")
-            with pytest.raises(icontract.ViolationError):
-                rec.start("rm -rf /")
+        runner = _mock_runner()
+        rec = OSWorldFFmpegRecorder(runner, _SCREEN, tmp_path / "rec", fps=30)
+        with pytest.raises(icontract.ViolationError):
+            rec.start("bad;id")
+        with pytest.raises(icontract.ViolationError):
+            rec.start("rm -rf /")
 
-    @patch("strata.observability.recorder._OSWorldHTTPClient")
-    def test_disables_after_consecutive_failures(
-        self, mock_client_cls: MagicMock, tmp_path: Path
-    ) -> None:
-        mock_client = MagicMock()
-        mock_client_cls.return_value = mock_client
-        mock_client.post_json.side_effect = OSWorldConnectionError("down")
-
-        rec = OSWorldFFmpegRecorder(_osworld_config(), tmp_path / "rec", fps=30)
-        rec._client = mock_client
+    def test_disables_after_consecutive_failures(self, tmp_path: Path) -> None:
+        runner = _mock_runner()
+        runner.post_json.side_effect = OSWorldConnectionError("down")
+        rec = OSWorldFFmpegRecorder(runner, _SCREEN, tmp_path / "rec", fps=30)
 
         for _ in range(3):
             rec.start("attempt")
         assert rec._disabled is True
 
         rec.start("another")
-        assert mock_client.post_json.call_count == 3
+        assert runner.post_json.call_count == 3
 
     def test_note_event_rejects_empty_kind(self, tmp_path: Path) -> None:
-        with patch("strata.observability.recorder._OSWorldHTTPClient"):
-            rec = OSWorldFFmpegRecorder(_osworld_config(), tmp_path / "rec", fps=30)
-            with pytest.raises(icontract.ViolationError):
-                rec.note_event("", {"x": 1})
+        runner = _mock_runner()
+        rec = OSWorldFFmpegRecorder(runner, _SCREEN, tmp_path / "rec", fps=30)
+        with pytest.raises(icontract.ViolationError):
+            rec.note_event("", {"x": 1})
+
+    def test_runner_satisfies_protocol(self) -> None:
+        runner = _mock_runner()
+        assert isinstance(runner, RemoteCodeRunner)

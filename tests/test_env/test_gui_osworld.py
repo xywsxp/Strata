@@ -2,7 +2,7 @@
 
 Phase 9.4++ rewrite: the adapter now talks to the OSWorld Docker server over
 HTTP (pyautogui action-space via ``POST /run_python``, ``GET /screenshot``,
-``POST /screen_size``). Tests mock :class:`_OSWorldHTTPClient` directly — no
+``POST /screen_size``). Tests mock :class:`OSWorldHTTPClient` directly — no
 ``desktop_env`` Python package is required.
 """
 
@@ -61,7 +61,7 @@ class TestConstructionGoesThroughHTTP:
         mock_client = MagicMock()
         mock_client.post_json.return_value = {"width": 1920, "height": 1080}
         with patch(
-            "strata.env.gui_osworld._OSWorldHTTPClient",
+            "strata.env.gui_osworld.OSWorldHTTPClient",
             return_value=mock_client,
         ):
             adapter = OSWorldGUIAdapter(_osworld_config())
@@ -75,7 +75,7 @@ class TestConstructionGoesThroughHTTP:
         mock_client.post_json.return_value = {"width": 1024, "height": 768}
         with (
             patch(
-                "strata.env.gui_osworld._OSWorldHTTPClient",
+                "strata.env.gui_osworld.OSWorldHTTPClient",
                 return_value=mock_client,
             ),
             pytest.raises(ConfigError, match="screen size mismatch"),
@@ -89,7 +89,7 @@ class TestConstructionGoesThroughHTTP:
         mock_client.post_json.side_effect = OSWorldConnectionError("POST /screen_size failed")
         with (
             patch(
-                "strata.env.gui_osworld._OSWorldHTTPClient",
+                "strata.env.gui_osworld.OSWorldHTTPClient",
                 return_value=mock_client,
             ),
             pytest.raises(OSWorldConnectionError),

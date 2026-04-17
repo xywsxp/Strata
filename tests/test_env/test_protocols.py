@@ -26,7 +26,7 @@ class TestProtocolRuntimeCheckable:
 
 class TestStubFailFast:
     def test_linux_gui_construction_fails(self) -> None:
-        with pytest.raises(UnsupportedPlatformError, match="Linux native GUI"):
+        with pytest.raises(UnsupportedPlatformError, match="Native Linux GUI"):
             LinuxGUIAdapter()
 
     def test_macos_gui_construction_fails(self) -> None:
