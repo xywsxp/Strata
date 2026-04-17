@@ -285,6 +285,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"No tasks match tag {args.tag!r}", file=sys.stderr)
             return 2
 
+    from strata.health import check_all, require_healthy
+
+    cfg = load_config(args.config)
+    statuses = check_all(cfg)
+    for s in statuses:
+        mark = "+" if s.ok else "!"
+        print(f"[{mark}] {s.component}: {s.detail} ({s.latency_ms:.0f}ms)")
+    require_healthy(statuses)
+
     print(f"[=] {len(tasks)} task(s) to run\n")
 
     reports: list[TaskReport] = []

@@ -27,3 +27,17 @@ def repo_config() -> StrataConfig:
     if not _CONFIG_PATH.exists():
         pytest.skip(f"config.toml not found at {_CONFIG_PATH}")
     return load_config(str(_CONFIG_PATH))
+
+
+@pytest.fixture(scope="session")
+def osworld_url(repo_config: StrataConfig) -> str:
+    """Return OSWorld server URL; skip if not enabled or unreachable."""
+    if not repo_config.osworld.enabled:
+        pytest.skip("osworld.enabled=false in config.toml")
+
+    from strata.health import check_osworld
+
+    status = check_osworld(repo_config)
+    if not status.ok:
+        pytest.skip(f"OSWorld not reachable: {status.detail}")
+    return repo_config.osworld.server_url

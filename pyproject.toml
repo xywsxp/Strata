@@ -45,6 +45,7 @@ addopts = "-q --tb=short"
 markers = [
     "live_llm: requires real LLM API keys and network access",
     "integration: requires OSWorld Docker environment",
+    "live_gui: requires a display server (X11/Wayland) for native GUI tests",
 ]
 
 [tool.hypothesis]

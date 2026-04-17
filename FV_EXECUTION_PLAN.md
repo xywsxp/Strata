@@ -1,7 +1,9 @@
-# FV 执行计划：OSWorld 调试基础设施
+# FV 执行计划：OSWorld 解耦 + 端到端验证通路
 
 > 决议：
-> **Q1**=`paths.run_root` 可配置，默认 `./.strata-run`｜**Q2**=`keep_last_runs=5`｜**Q3'**=C（双轨：in-container ffmpeg + task-boundary keyframe PNGs）｜**Q4**=`target="host"|"osworld"` 双支持｜**Q5**=新字段 + 旧字段并存带 `DeprecationWarning`｜**Q6**=`30` fps。
+> **Q1**=pyautogui 暂不加依赖（headless 服务器，GUI 全走 OSWorld）｜**Q2**=`os_type` 保留在 `[osworld]`，非 OSWorld 从 `platform.system()` 推断｜**Q3**=LLM 失败直接退出｜**Q4**=N/A（headless）｜**Q5**=OSWorld 已启动，测试自动探测连接｜**Q6**=`target="osworld"` 通过 `POST /execute` 在容器内执行｜**Q7**=`create-hello-txt` + `read-hostname` 必须 PASS。
+>
+> A11y 层正式 ABANDONED：`IA11yAdapter` 设计不实现，感知层永久纯 VLM。
 >
 > 对应讨论文档：`PLAN_DISCUSSION.md`。
 
@@ -11,8 +13,8 @@
 
 - 遵循 workspace.mdc：**SPECIFY → IMPLEMENT → VERIFY**，契约先行、类型先行、Hypothesis 次之、示例兜底、ruff 过线。
 - Write-Review 物理隔离；熔断 3 次交人类；Phase 完成前 Gate Check：`mypy --strict . && pytest -q && ruff check . && ruff format --check .`。
-- 观测层**绝不升格为 goal 失败**——任何 I/O 错误 stderr warning + 降级（与 `AuditLogger` 同策略）。
-- 新增组件默认可关，向后兼容：`config.osworld.enabled=false` → `TrajectoryRecorder` noop；`[paths]` 缺省 → fallback `~/.strata/...`。
+- 观测层**绝不升格为 goal 失败**——任何 I/O 错误 stderr warning + 降级。
+- LLM health check 失败 → **直接退出**（与观测层策略相反：LLM 不可用 = agent 注定失败，不降级）。
 
 ---
 
@@ -21,34 +23,39 @@
 ```
 strata/
 ├── core/
-│   └── config.py              [改] 新增 PathsConfig；StrataConfig.paths；兼容旧字段
-├── paths.py                   [新] RunDirLayout + gc_old_runs
-├── observability/             [新 package]
-│   ├── __init__.py
-│   ├── transcript.py          [新] ChatTranscriptSink Protocol + FileChatTranscriptSink
-│   ├── recorder.py            [新] TrajectoryRecorder（in-container ffmpeg）
-│   └── null.py                [新] NullRecorder / NullSink（osworld 关闭时 noop）
-├── llm/
-│   ├── router.py              [改] 构造时接收 sink；每次 chat 调用回调
-│   └── provider.py            [不改] 保持 provider 单一职责
-└── harness/
-    ├── orchestrator.py        [改] 用 RunDirLayout；注入 sink + recorder
-    ├── persistence.py         [不改] 复用 state_dir 构造参数
-    └── context.py             [微改] compress() 默认使用 layout.context_dir
-
-tasks/                         [新目录] 声明式题库
-├── TEMPLATE.toml
-├── create-hello-txt.toml
-├── list-tmp-count.toml
-├── read-hostname.toml
-└── README.md
+│   └── config.py                [微改] os_type 默认值逻辑
+├── env/
+│   ├── protocols.py             [不改] IGUIAdapter 等 5 Protocol
+│   ├── osworld_client.py        [新] 提取 _OSWorldHTTPClient + OSWorldRawClient
+│   ├── gui_osworld.py           [改] import 路径改为 osworld_client
+│   ├── factory.py               [改] 清晰双路 + 错误消息
+│   └── linux/gui.py             [改] 错误消息改善（不再暗示"就用 OSWorld"）
+├── observability/
+│   └── recorder.py              [改] 注入 RemoteCodeRunner Protocol
+├── harness/
+│   └── orchestrator.py          [改] os_type 解耦；recorder 构造解耦
+├── health.py                    [新] LLM / OSWorld / GUI 健康检查
+└── __main__.py                  [改] 启动时调 health check
 
 scripts/
-├── agent_e2e.py               [不改] 保留为单次 smoke（被 run_tasks 超集化）
-└── run_tasks.py               [新] 批量题目执行器 + 报告聚合
+├── run_tasks.py                 [改] 补全 target="osworld" 路径
+└── agent_e2e.py                 [改] 加 health check
 
-.strata-run/                   [新目录，gitignore]  运行期产物
-reports/                       [新目录，gitignore]  跨 run 汇总
+tasks/
+├── create-hello-txt.toml        [改] target → osworld
+├── read-hostname.toml           [改] target → osworld
+└── list-tmp-count.toml          [不改] 无 verify
+
+tests/
+├── conftest.py                  [改] 添加 OSWorld auto-detect fixture
+├── e2e/
+│   ├── conftest.py              [改] 添加 osworld 连接 fixture
+│   ├── test_live_llm.py         [改] 扩展覆盖
+│   ├── test_osworld_pipeline.py [改] 加 health check 测试
+│   └── test_e2e_tasks.py        [新] 端到端题目执行测试
+├── test_env/
+│   └── test_osworld_client.py   [新] 提取后的 HTTP client 单元测试
+└── test_health.py               [新] health check 单元测试
 ```
 
 **不可变 API 边界**（本次不碰）：
@@ -56,19 +63,19 @@ reports/                       [新目录，gitignore]  跨 run 汇总
 - `TaskGraph` / `TaskNode` / `ActionResult` 的字段。
 - `AgentUI` Protocol。
 - `decompose_goal` / `adjust_plan` 的调用契约。
+- `ChatMessage` / `ChatResponse` / `LLMProvider` Protocol。
 
 ---
 
 ## Strategy 状态
 
 **现有（`tests/strategies.py`，不变）**：
-- `task_node_strategy`
-- `task_graph_strategy`
-- `action_result_strategy`
-- `screen_region_strategy`
-- 其余 value-object strategies
+- `st_task_node` / `st_task_graph`
+- `st_sandbox_path` / `st_coordinate` / `st_command_result`
+- `st_action_name` / `st_primitive_task_node` / `st_invalid_primitive_task`
+- `st_failing_sequence` / `st_deterministic_mock_executor`
 
-**本次新增**：**无**。新组件全部是 I/O 编排（路径、HTTP、进程、文件），不存在通用命题适合 Hypothesis；L2 层收窄到少数纯函数（`gc_old_runs` 单调性、TaskFile loader 的 round-trip）。
+**本次新增**：**无**。新组件全部是 I/O 编排（HTTP、进程、连接验证），不存在通用命题适合 Hypothesis。
 
 ---
 
@@ -76,10 +83,13 @@ reports/                       [新目录，gitignore]  跨 run 汇总
 
 | 现象 | 根因 | 修正态 | 触碰文件 |
 |---|---|---|---|
-| state 文件散在 `~/.strata/` 难清理 | 默认路径分散在 `config.py` / `orchestrator._default_state_dir` / `context.compress` 三处 | `RunDirLayout` 单一真相 | `strata/paths.py`、`orchestrator.py`、`context.py` |
-| agent 失败无法回放屏幕 | 只有轮询 screenshot，无连续视频 | 容器内 ffmpeg x11grab 30 fps h264 + 任务边界 keyframe PNG | `strata/observability/recorder.py`、`orchestrator.py` |
-| LLM I/O 黑箱 | base64 图片直接进 HTTP body 后丢失 | `ChatTranscriptSink` 在 router 层拦截，PNG 旁置 | `strata/observability/transcript.py`、`llm/router.py` |
-| 题目写死在 `DEFAULT_GOALS` 常量 | 没有声明式格式 | `tasks/*.toml` + `scripts/run_tasks.py` | `tasks/`、`scripts/run_tasks.py` |
+| `osworld.enabled=false` 时 agent 无法启动 | `LinuxGUIAdapter.__init__` 直接抛异常，factory 无降级 | 错误消息改善；headless 场景文档化 | `env/linux/gui.py`、`env/factory.py` |
+| `recorder.py` 反向依赖 `gui_osworld._OSWorldHTTPClient` | 观测层 import env 具体实现 | `RemoteCodeRunner` Protocol 注入 | `observability/recorder.py` |
+| `orchestrator._plan` 用 `config.osworld.os_type` | 核心循环对 OSWorld 有语义依赖 | 从 `platform.system()` 推断，OSWorld 时用 config 覆盖 | `harness/orchestrator.py` |
+| `run_tasks.py` 忽略 `target="osworld"` | `_run_shell_host` 是唯一路径 | 新增 `_run_shell_osworld` 通过 `POST /execute` | `scripts/run_tasks.py` |
+| 所有 task 文件 `target="host"` | agent 操作在容器内，host verify 看不到容器文件 | 改为 `target="osworld"` | `tasks/*.toml` |
+| 启动无 health check | 连接错误延迟到首次操作 | `strata/health.py` 启动时验证 | `health.py`、`__main__.py` |
+| 所有测试全 mock | 从未 live 验证 | 扩展 e2e 测试 + 新 marker | `tests/e2e/*` |
 
 ---
 
@@ -87,709 +97,606 @@ reports/                       [新目录，gitignore]  跨 run 汇总
 
 | Phase | 变更域 | 新增验证数 (L0/L1/L2/L3) |
 |---|---|---|
-| P1 路径统一 | `paths.py` + `config.py` + `orchestrator.py` | 6 / 4 / 1 / 5 |
-| P2 观测层 | `observability/*` + `llm/router.py` + `orchestrator.py` | 9 / 4 / 0 / 8 |
-| P3 题目协议 | `tasks/` + `scripts/run_tasks.py` | 5 / 4 / 1 / 6 |
-| **合计** | | **20 / 12 / 2 / 19** |
+| P1 连接验证层 | `health.py` + `__main__.py` + `conftest.py` | 4 / 3 / 0 / 8 |
+| P2 端到端通路 | `run_tasks.py` + `tasks/*.toml` + `test_e2e_tasks.py` | 3 / 2 / 0 / 7 |
+| P3 OSWorld 解耦 | `osworld_client.py` + `recorder.py` + `orchestrator.py` + `factory.py` | 6 / 4 / 0 / 12 |
+| P4 端到端验收 | 执行 + 报告 | 0 / 0 / 0 / 3 |
+| **合计** | | **13 / 9 / 0 / 30** |
 
 ---
 
-# Phase P1：路径统一 + 配置扩展
+# Phase P1：连接验证层
 
-## Step P1.1：`strata/paths.py` —— RunDirLayout
+## Step P1.1：`strata/health.py` —— Health Check 函数
 
-**目标**：把"一次 run 的所有产物路径"收敛成一个 frozen 值对象，构造即目录创建，调用方零拼接。
+**目标**：提供 LLM 和 OSWorld 的连接验证函数，fail-fast 语义。
 
-**新建文件**：`strata/paths.py`
+**新建文件**：`strata/health.py`
 
 **先读文件清单**：
-- `strata/core/config.py`（理解 `StrataConfig` 结构，为 Step P1.2 铺路）
-- `strata/harness/orchestrator.py:120-145`（现有 `_default_state_dir` / `AuditLogger(config.audit_log)` 路径语义）
-- `strata/harness/context.py:105-128`（`compress` 默认路径）
+- `strata/llm/provider.py`（`ChatMessage`、`ChatResponse`、`LLMProvider` Protocol）
+- `strata/llm/router.py`（`LLMRouter` 构造与 role 分发）
+- `strata/core/config.py`（`StrataConfig`、`OSWorldConfig`、`LLMProviderConfig`）
+- `strata/core/errors.py`（`LLMAPIError`、`OSWorldConnectionError`）
+- `strata/env/gui_osworld.py:28-65`（`_OSWorldHTTPClient` 的 HTTP 方法）
 
 **API 规格**：
 
 ```python
 @dataclass(frozen=True)
-class PathsConfig:
-    run_root: str            # 绝对路径，dataclass 内部已 expanduser
-    keep_last_runs: int      # >= 0；0 表示无限保留
+class HealthStatus:
+    component: str
+    ok: bool
+    detail: str
+    latency_ms: float
 
-@dataclass(frozen=True)
-class RunDirLayout:
-    run_root: Path
-    run_dir: Path            # run_root / "runs" / <timestamp>_<goal-hash8>
-    checkpoint_path: Path
-    audit_log_path: Path
-    context_dir: Path
-    llm_dir: Path
-    screenshots_dir: Path
-    recordings_dir: Path
-    logs_dir: Path
-    manifest_path: Path
+@icontract.require(lambda config: len(config.providers) > 0)
+@icontract.ensure(lambda result: len(result) > 0)
+def check_llm_providers(config: StrataConfig) -> Sequence[HealthStatus]: ...
 
-    @classmethod
-    def create(cls, paths_config: PathsConfig, goal: str) -> RunDirLayout: ...
+@icontract.require(lambda config: config.osworld.enabled)
+def check_osworld(config: StrataConfig) -> HealthStatus: ...
 
-    def ensure(self) -> None: ...
-    def link_current(self) -> None: ...
-    def write_manifest(
-        self,
-        goal: str,
-        config_snapshot: Mapping[str, object],
-        started_at: float,
-    ) -> None: ...
+def check_all(config: StrataConfig) -> Sequence[HealthStatus]: ...
 
-def gc_old_runs(run_root: Path, keep: int) -> Sequence[Path]: ...
+@icontract.ensure(lambda result: result is None, "exits on failure")
+def require_healthy(statuses: Sequence[HealthStatus]) -> None: ...
 ```
 
 **契约**：
-- `PathsConfig.__post_init__`：`run_root` 必须是绝对路径；`keep_last_runs >= 0`。
-- `RunDirLayout.create.require(goal.strip())`：goal 非空。
-- `RunDirLayout.ensure.ensure`：所有子目录都已存在。
-- `gc_old_runs.require`：`keep >= 0`；`run_root` 若不存在则视作空目录不报错。
-- `gc_old_runs.ensure`：返回的路径都在 `run_root/runs/` 下，且都已删除。
+- `check_llm_providers.require`：`config.providers` 非空。
+- `check_llm_providers.ensure`：返回列表长度 == provider 数量；每项 `component` 包含 provider 名。
+- `check_osworld.require`：`config.osworld.enabled == True`。
+- `require_healthy`：任一 `ok=False` → `sys.exit(1)`（打印失败组件名 + detail）。
 
 **验证矩阵**：
-
-- **L0** `mypy --strict strata/paths.py`：`Path` vs `str` 不混用；`PathsConfig.run_root` 必须为 `str`（TOML 友好），`RunDirLayout.*` 均为 `Path`。
-- **L1** 4 个 icontract 装饰器（见上）。
-- **L2** `test_gc_monotonic`：任取 `(N, keep)`，`gc_old_runs` 删除数 == `max(0, N - keep)`；再次调用删除数 == 0（幂等）。
+- **L0**：`HealthStatus` frozen dataclass 字段类型。`check_all` 返回 `Sequence[HealthStatus]`。
+- **L1**：3 个 icontract 装饰器。
 - **L3**：
-  - `test_run_layout_create_all_paths_under_run_dir`
-  - `test_ensure_creates_directory_tree`
-  - `test_write_manifest_round_trip`
-  - `test_link_current_symlink_points_to_latest`
-  - `test_gc_keeps_latest_k_by_mtime`
+  - `test_check_llm_success_with_mock_provider`
+  - `test_check_llm_failure_with_unreachable_provider`
+  - `test_check_osworld_success_with_mock_server`
+  - `test_check_osworld_failure_with_unreachable_server`
+  - `test_require_healthy_exits_on_failure`
+  - `test_require_healthy_passes_on_all_ok`
 
 **Strategy 变更**：无。
 
-**异常设计**：无新异常——`OSError` 直接透传，调用方（orchestrator）决定是否降级。
-
-**依赖标注**：无依赖；P1.2/P1.3 依赖本 Step。
-
-**Review 检查项**：
-- `run_dir` 名包含 goal hash（短 8 字节十六进制）防止同时间戳冲突。
-- `ensure()` 对已有目录幂等，不抛异常。
-- `gc_old_runs` 按 mtime 排序，删除最老的；`keep=0` 特判为不删除（协议：0 = 不限制）。
-- `link_current` 必须是 symlink 而非实际复制；失败（如 Windows、权限）降级为 warning 不抛。
-
----
-
-## Step P1.2：`StrataConfig[paths]` 扩展
-
-**目标**：把 `[paths]` 段接入 TOML 解析，保留 `audit_log` / `trash_dir` 旧字段带 `DeprecationWarning`。
-
-**修改文件**：`strata/core/config.py`
-
-**先读文件清单**：
-- `strata/core/config.py`（全读）
-- `tests/test_core/test_config.py`（了解现有断言）
-- `config.toml`（当前用户配置）
-
-**API 规格**：
-
-```python
-@dataclass(frozen=True)
-class PathsConfig:  # 已在 Step P1.1 定义
-    run_root: str
-    keep_last_runs: int
-
-@dataclass(frozen=True)
-class StrataConfig:
-    ...
-    paths: PathsConfig
-    audit_log: str   # 保留但标记 deprecated
-    trash_dir: str   # 保留但标记 deprecated
-    ...
-
-def _parse_paths(raw: object) -> PathsConfig: ...
-```
-
-**契约**：
-- `_parse_paths`：`run_root` 字符串非空；`keep_last_runs` 非负整数。
-- `load_config` 新 ensure：`result.paths.run_root` 为绝对路径（`_expand` 已处理）。
-
-**验证矩阵**：
-- **L0**：`StrataConfig.paths: PathsConfig` mypy 覆盖。
-- **L1**：`_parse_paths` 的 2 个参数谓词。
-- **L2**：无。
-- **L3**：
-  - `test_load_config_with_paths_section`
-  - `test_load_config_missing_paths_uses_defaults`
-  - `test_deprecated_audit_log_still_accepted`（旧 config.toml 仍然可解析）
-  - `test_paths_run_root_expands_tilde`
-
-**Strategy 变更**：无。
-
-**异常设计**：`ConfigError`（已有）用于字段非法。
-
-**依赖标注**：依赖 Step P1.1。
-
-**Review 检查项**：
-- 缺省值：`run_root="~/.strata/runs-fallback"` ≠ `./.strata-run`——避免 `cwd` 变动影响；`config.toml` 里显式写 `run_root="./.strata-run"` 即为用户选择的 workspace-local 行为。
-- 旧 `audit_log` / `trash_dir` 仍然在解析结果里，Phase 结束前不移除（防止用户配置爆炸）。
-- `DeprecationWarning` 只在同时提供新字段 `[paths]` 且旧字段非默认时发一次（用 `warnings.warn` 的 `stacklevel=3`）。
-
----
-
-## Step P1.3：Orchestrator 接入 RunDirLayout
-
-**目标**：`AgentOrchestrator.__init__` 从 `StrataConfig.paths` 构造 layout，替代 `_default_state_dir`；`AuditLogger` / `PersistenceManager` / `ContextManager.compress` 全部改拿 layout 下的路径。
-
-**修改文件**：`strata/harness/orchestrator.py`
-
-**先读文件清单**：
-- `strata/harness/orchestrator.py:100-160`（`__init__` 构造链）
-- `strata/harness/orchestrator.py:650-684`（`_default_state_dir` 实现）
-- `strata/harness/persistence.py:138-160`（`PersistenceManager` 签名）
-- `strata/harness/context.py:105-128`（`compress` 默认路径）
-- `tests/test_harness/test_orchestrator.py:30-50`（`STRATA_STATE_DIR` 测试隔离后门）
-
-**API 规格**：
-
-```python
-class AgentOrchestrator:
-    def __init__(
-        self,
-        config: StrataConfig,
-        bundle: EnvironmentBundle,
-        ui: AgentUI,
-        llm_router: LLMRouter | None = None,
-        executor: TaskExecutor | None = None,
-        layout: RunDirLayout | None = None,   # 新增可选注入，默认从 config 派生
-    ) -> None: ...
-```
-
-**契约**：
-- `__init__.require`：`config`、`bundle`、`ui` 非 None（已有）。
-- `_create_layout_for_run.ensure`：返回 layout 的目录结构已创建。
-- 保持 `run_goal.ensure(final_state in COMPLETED|FAILED)` 不变。
-
-**验证矩阵**：
-- **L0**：`layout: RunDirLayout | None` 类型正确传递。
-- **L1**：新构造契约（见上）。
-- **L2**：无。
-- **L3**：
-  - `test_orchestrator_creates_run_dir_under_paths_root`（新）
-  - `test_orchestrator_audit_goes_to_layout_audit_path`（新）
-  - `test_orchestrator_checkpoint_goes_to_layout_dir`（改写既有）
-  - `test_STRATA_STATE_DIR_env_still_overrides`（回归：后门保留）
-  - 全部既有 `test_orchestrator.py` 测试回绿（约 40 个）
-
-**Strategy 变更**：无。
-
-**异常设计**：无新异常；layout 构造失败沿用 `OSError`。
-
-**依赖标注**：依赖 Step P1.1 + P1.2。
-
-**Review 检查项**：
-- `_default_state_dir()` 的 `STRATA_STATE_DIR` 环境变量后门**必须保留**，但改为"优先于配置"——测试生态的跨 run 隔离靠它。
-- 每次 `run_goal()` 调用生成**新的 `run_dir`**（layout.run_dir 是 per-run 的），但 `checkpoint_path` 要跨 run 保持一致以支持 resume——**决策**：`checkpoint.json` 放在 `run_root` 而非 `run_dir` 下；`run_dir` 只放本次的 audit/llm/recordings。
-- goal hash 生成放 layout.create 里；run_id 字符串对外只在 `log_prefix` / manifest.json 里用。
-- GC 时机：`run_goal` 成功完成后触发 `gc_old_runs(run_root, keep_last_runs)`；失败不 GC（保留 debug 资料）。
-
----
-
-## Step P1.4：.gitignore + config.toml 默认值
-
-**目标**：把新目录加 ignore；`config.toml` 给出可用的 `[paths]` 示例。
-
-**修改文件**：`.gitignore`、`config.toml`
-
-**先读文件清单**：`.gitignore`（末尾）、`config.toml`（全读）
-
-**API 规格**：纯配置变更。
-
-**验证矩阵**：
-- **L3**：手工验证 `git status` 不报告 `.strata-run/` / `reports/`。
-
-**Strategy 变更**：无。
-
-**依赖标注**：依赖 Step P1.3（目录路径最终确定后才写入默认值）。
-
-**Review 检查项**：
-- `.gitignore` 追加 `.strata-run/` + `reports/`，放在 "# Strata runtime artifacts" 注释之后，不和原有 UV/mypy 段混编。
-- `config.toml` 的 `[paths]` 段含所有字段 + 中文注释，能作为文档直接被用户参考。
-
----
-
-# Phase P2：观测层（Transcript + Recorder）
-
-## Step P2.1：`ChatTranscriptSink` + FileChatTranscriptSink
-
-**目标**：定义 sink 协议，实现文件系统落盘版；messages 序列化时把 `images: bytes` 抽成旁置 PNG。
-
-**新建文件**：`strata/observability/__init__.py`、`strata/observability/transcript.py`、`strata/observability/null.py`
-
-**先读文件清单**：
-- `strata/llm/provider.py`（`ChatMessage` / `ChatResponse` 结构，尤其 `images: Sequence[bytes]`）
-- `strata/harness/context.py:138-183`（`AuditLogger` 的 I/O 失败降级范式）
-
-**API 规格**：
-
-```python
-@runtime_checkable
-class ChatTranscriptSink(Protocol):
-    def record(
-        self,
-        role: str,
-        messages: Sequence[ChatMessage],
-        response: ChatResponse | None,
-        error: Exception | None,
-    ) -> None: ...
-
-class FileChatTranscriptSink:
-    def __init__(self, out_dir: Path) -> None: ...
-    def record(...) -> None: ...
-
-class NullTranscriptSink:
-    def record(...) -> None: ...  # 完全 noop
-```
-
-**契约**：
-- `FileChatTranscriptSink.__init__.require`：`out_dir` 路径存在或可创建。
-- `record.require`：`role` 非空字符串；`messages` 非空。
-- `record.ensure`：文件名 `<seq:04d>_<role>_req.json` 序号单调递增；每张 `msg.images[i]` 旁置为 `<seq>_<role>_img_<i>.png`；JSON 里 `images` 字段是 PNG 相对路径字符串数组。
-
-**验证矩阵**：
-- **L0**：Protocol 运行时检查；`NullTranscriptSink` 是否满足 `ChatTranscriptSink` 由 `isinstance(.., ChatTranscriptSink)` 在测试里断言。
-- **L1**：`__init__` + `record` 4 个契约。
-- **L2**：无（序列号单调性用 L3 例子即可）。
-- **L3**：
-  - `test_sink_writes_req_and_resp_json_files`
-  - `test_sink_extracts_images_to_png_siblings`
-  - `test_sink_records_error_when_response_is_none`
-  - `test_sink_osError_silently_warns_and_continues`
-  - `test_null_sink_implements_protocol`
-
-**Strategy 变更**：无。
-
-**异常设计**：
-- sink 内部 OSError → stderr warning + 吞掉（与 `AuditLogger` 完全一致）。
-- 序列号争用用 `itertools.count()` + `threading.Lock()`——单进程并发安全。
+**异常设计**：无新异常。`check_*` 函数**不抛异常**——内部 catch 所有错误并转为 `HealthStatus(ok=False, detail=repr(exc))`。`require_healthy` 用 `sys.exit` 而非异常（入口点语义）。
 
 **依赖标注**：无依赖。
 
 **Review 检查项**：
-- **图片必须是原始 bytes 落盘，禁止 base64 JSON 内联**——discord 级别的 debug 体验差异。
-- JSON 里 `ChatResponse.usage` 原样保留（方便做 cost 报表）。
-- `FileChatTranscriptSink` 必须幂等：重复 `record` 不抢占同一 seq。
-- 对 `error is not None` 情况也写 `_req.json`，但 `_resp.json` 替换为 `_err.json` 存异常类型和 repr。
+- LLM health check 发 minimal message `[ChatMessage(role="user", content="ping")]`，`max_tokens=1`，`temperature=0`。只验证能返回不报错，不关心内容。
+- OSWorld health check 用 `POST /screen_size`（轻量，不截图）。
+- `latency_ms` 用 `time.monotonic()` 测量，精度足够。
+- 所有网络调用有独立 timeout（5s），不继承 config 里的 `request_timeout`。
 
 ---
 
-## Step P2.2：`LLMRouter` 接入 sink
+## Step P1.2：入口点集成
 
-**目标**：router 拥有 sink，在每个 `plan/ground/see/search` 调用的前后/异常路径调用 `sink.record`。
+**目标**：`__main__.py`、`scripts/agent_e2e.py`、`scripts/run_tasks.py` 启动时调用 health check。
 
-**修改文件**：`strata/llm/router.py`
+**修改文件**：`strata/__main__.py`、`scripts/agent_e2e.py`、`scripts/run_tasks.py`
 
 **先读文件清单**：
-- `strata/llm/router.py`（全读，只 88 行）
-- `strata/llm/provider.py:117-187`（chat 的成功 / 异常出口）
+- `strata/__main__.py`（全读，79 行）
+- `scripts/agent_e2e.py:116-125`（`main` 函数启动段）
+- `scripts/run_tasks.py:250-260`（`main` 函数启动段）
 
-**API 规格**：
+**API 规格**：在每个入口的 `load_config` 之后、`EnvironmentFactory.create` 之前插入：
 
 ```python
-class LLMRouter:
-    def __init__(
-        self,
-        config: StrataConfig,
-        sink: ChatTranscriptSink | None = None,  # 新增，默认 NullTranscriptSink
-    ) -> None: ...
-
-    # plan/ground/see/search 内部包一层 try/except，在出口调 sink.record
+from strata.health import check_all, require_healthy
+statuses = check_all(config)
+for s in statuses:
+    mark = "+" if s.ok else "!"
+    print(f"[{mark}] {s.component}: {s.detail} ({s.latency_ms:.0f}ms)")
+require_healthy(statuses)
 ```
 
-**契约**：
-- `__init__.require`：`config.roles` 全部命中 providers（已有）。
-- 新 `ensure`：`self._sink` 恒非 None（默认 NullTranscriptSink）。
+**契约**：无新增（复用 P1.1 的契约）。
 
 **验证矩阵**：
-- **L0**：签名 mypy 覆盖。
-- **L1**：`__init__.ensure`。
+- **L0**：import 路径 mypy 覆盖。
 - **L3**：
-  - `test_router_calls_sink_on_success`
-  - `test_router_calls_sink_on_transient_error`
-  - `test_router_calls_sink_on_permanent_error`（重点：异常类型要透传给 sink 再重新 raise）
-  - `test_router_defaults_to_null_sink`
-  - 既有 `test_llm/test_router.py` 全部回绿
+  - `test_main_exits_on_llm_failure`（mock `check_all` 返回失败 → `SystemExit`）
+  - `test_main_continues_on_all_healthy`（mock `check_all` 返回全 ok → 继续）
 
 **Strategy 变更**：无。
 
-**异常设计**：
-- Provider 抛 `LLMAPIError` → router **先** `sink.record(role, messages, None, exc)` **再** re-raise。顺序不能反，否则异常丢失消息。
+**异常设计**：无。
 
-**依赖标注**：依赖 Step P2.1。
+**依赖标注**：依赖 Step P1.1。
 
 **Review 检查项**：
-- Provider 层**不改**——保持 `chat()` 单一职责。sink 是 router 关心的事情。
-- Router 的 4 个方法包装必须 DRY：抽一个 `_dispatch(role, messages, **kwargs)` 私有方法，四个 public 方法只是 thin wrapper。
-- 并发：LLMRouter 在单进程内的 orchestrator 单线程调用，无需加锁；但 `FileChatTranscriptSink` 自身要 thread-safe（见 Step P2.1）。
+- `require_healthy` 的 `sys.exit(1)` 在 `__main__` 里直接生效；在 `scripts/` 里也直接生效（都是 `if __name__ == "__main__"` 入口）。
+- health check 输出格式与已有 `[+]` 前缀风格一致。
 
 ---
 
-## Step P2.3：`TrajectoryRecorder` 双轨录制
+## Step P1.3：pytest conftest + Live 测试 fixture
 
-**目标**：启动时在 OSWorld 容器内 spawn `ffmpeg x11grab`；停止时 SIGINT + 拉 mp4 到 host；中途可打 task-boundary keyframe PNG + events.jsonl。
+**目标**：在 `tests/conftest.py` 和 `tests/e2e/conftest.py` 里添加 OSWorld 自动探测 fixture，`live_llm` 和 `integration` marker 自动跳过。
 
-**新建文件**：`strata/observability/recorder.py`
+**修改文件**：`tests/conftest.py`、`tests/e2e/conftest.py`、`pyproject.toml`
 
 **先读文件清单**：
-- `strata/env/gui_osworld.py`（全读，理解 `_OSWorldHTTPClient` / `_run_python` / `capture_screen`）
-- `PLAN_DISCUSSION.md` §3.2（最终方案）
-- `strata/core/config.py`（`OSWorldConfig` 结构）
+- `tests/conftest.py`（当前为空 stub）
+- `tests/e2e/conftest.py`（现有 `repo_config` fixture）
+- `pyproject.toml`（现有 markers）
 
 **API 规格**：
 
 ```python
+# tests/conftest.py
+@pytest.fixture(scope="session")
+def repo_config() -> StrataConfig | None:
+    """Load config.toml from repo root; None if missing."""
+    ...
+
+# tests/e2e/conftest.py
+@pytest.fixture(scope="session")
+def live_config(repo_config: StrataConfig) -> StrataConfig:
+    """Skip if no config.toml."""
+    ...
+
+@pytest.fixture(scope="session")
+def osworld_url(live_config: StrataConfig) -> str:
+    """Return OSWorld server URL; skip if not enabled or unreachable."""
+    ...
+
+@pytest.fixture(scope="session")
+def osworld_client(osworld_url: str) -> OSWorldRawClient:
+    """Build an OSWorldRawClient for e2e tests."""
+    ...
+```
+
+**契约**：Fixture 级别，无 icontract。
+
+**验证矩阵**：
+- **L0**：fixture 返回类型。
+- **L3**（间接验证）：后续 e2e 测试能正常 skip/pass。
+
+**Strategy 变更**：无。
+
+**异常设计**：无。fixture skip 用 `pytest.skip()`。
+
+**依赖标注**：依赖 Step P1.1（`check_osworld` 用于 fixture 探测）。
+
+**Review 检查项**：
+- `osworld_url` fixture 内部调 `check_osworld`；unreachable → `pytest.skip("OSWorld not reachable")`。
+- `live_llm` marker 的 skip 逻辑移到 conftest fixture（从 `tests/e2e/test_live_llm.py` 的 module-level skip 改为 fixture-based）。
+- `STRATA_OSWORLD_URL` 环境变量仍然优先级最高（覆盖 config.toml 里的 `server_url`）。
+
+---
+
+# Phase P2：端到端通路打通
+
+## Step P2.1：`run_tasks.py` 补全 `target="osworld"` 路径
+
+**目标**：setup 和 verify 的 `target="osworld"` 通过 `POST /execute` 在 OSWorld 容器内执行。
+
+**修改文件**：`scripts/run_tasks.py`
+
+**先读文件清单**：
+- `scripts/run_tasks.py`（全读）
+- `scripts/osworld_smoke.py:40-64`（`OSWorldRawClient.execute` 的 wire format）
+- `strata/tasks.py`（`SetupSpec.target`、`VerifySpec.target` 类型）
+- `strata/core/config.py`（`OSWorldConfig.server_url`）
+
+**API 规格**：
+
+```python
+def _run_shell_osworld(
+    command: str,
+    server_url: str,
+    timeout: float,
+) -> ShellResult:
+    """Run a shell command inside the OSWorld container via POST /execute."""
+    ...
+
+def _run_shell(
+    target: Literal["host", "osworld"],
+    command: str,
+    timeout: float,
+    server_url: str = "",
+) -> ShellResult:
+    """Dispatch to host or osworld shell."""
+    ...
+```
+
+**契约**：
+- `_run_shell_osworld.require`：`server_url` 非空。
+- `_run_shell.require`：`timeout > 0`；`target == "osworld"` 时 `server_url` 非空。
+
+**验证矩阵**：
+- **L0**：`Literal["host", "osworld"]` 类型覆盖。
+- **L1**：2 个 require。
+- **L3**：
+  - `test_run_shell_host_executes_command`
+  - `test_run_shell_osworld_posts_to_execute`（mock HTTP）
+  - `test_run_shell_osworld_timeout_returns_error`（mock）
+  - `test_single_task_setup_osworld_dispatches_correctly`
+
+**Strategy 变更**：无。
+
+**异常设计**：复用 `OSWorldConnectionError`；在 `_run_shell_osworld` 内 catch → 转为 `ShellResult(returncode=-1, stderr=...)`。
+
+**依赖标注**：无依赖。
+
+**Review 检查项**：
+- `POST /execute` body 格式：`{"command": cmd, "shell": true}`。返回 JSON `{"output": "...", "returncode": 0}`——需确认 OSWorld Flask 服务端实际返回字段。
+- `_run_single` 里 setup/verify 调用改为 `_run_shell(task.setup.target, cmd, timeout, server_url=cfg.osworld.server_url)`。
+- `--config` 参数传入时 `server_url` 从 config 获取；OSWorld 未启用时 `target="osworld"` 的 task → `verdict=ERROR`。
+
+---
+
+## Step P2.2：Task 文件 target 修正
+
+**目标**：把 `create-hello-txt.toml` 和 `read-hostname.toml` 的 setup/verify target 从 `"host"` 改为 `"osworld"`（agent 在容器内操作，verify 必须在容器内检查）。
+
+**修改文件**：`tasks/create-hello-txt.toml`、`tasks/read-hostname.toml`
+
+**先读文件清单**：
+- `tasks/create-hello-txt.toml`（全读）
+- `tasks/read-hostname.toml`（全读）
+
+**API 规格**：纯数据文件变更。
+
+**验证矩阵**：
+- **L3**：
+  - `test_sample_tasks_parse_with_osworld_target`（`TaskFile.load` 断言 target 字段）
+  - `test_template_still_parses`（回归）
+
+**Strategy 变更**：无。
+
+**依赖标注**：依赖 Step P2.1（`run_tasks.py` 必须先支持 osworld target）。
+
+**Review 检查项**：
+- `create-hello-txt` 的 setup 命令 `rm -f /tmp/strata_e2e_hello.txt` 改在容器内执行（`target = "osworld"`）。
+- `read-hostname` 的 verify 命令 `cat /etc/hostname` 改在容器内执行——容器的 hostname 可能跟 host 不同。
+- `expected_stdout_regex` 可能需要调整（容器 hostname 不是 host hostname）。`read-hostname` 改为只校验 `expected_exit_code = 0`（文件存在即可），去掉 regex。
+
+---
+
+## Step P2.3：Live LLM 连接测试扩展
+
+**目标**：扩展 `tests/e2e/test_live_llm.py`，覆盖全部 4 个 role 的 roundtrip + vision 带图片。
+
+**修改文件**：`tests/e2e/test_live_llm.py`
+
+**先读文件清单**：
+- `tests/e2e/test_live_llm.py`（全读）
+- `strata/llm/provider.py:8-40`（`ChatMessage` / `ChatResponse`）
+- `strata/llm/router.py`（`LLMRouter.plan/ground/see/search`）
+
+**API 规格**：新增测试函数，无新 API。
+
+**验证矩阵**：
+- **L3**：
+  - `test_health_check_all_providers_pass`（用 `check_llm_providers`，真实 API）
+  - `test_router_plan_roundtrip`（`router.plan(messages)` 返回非空 content）
+  - `test_router_see_with_screenshot`（vision role + 真实 PNG → 返回含 JSON 的 content）
+
+**Strategy 变更**：无。
+
+**异常设计**：无。
+
+**依赖标注**：依赖 Step P1.1（`check_llm_providers`）+ P1.3（fixture）。
+
+**Review 检查项**：
+- 所有 live 测试标记 `@pytest.mark.live_llm`，默认不跑，`STRATA_LIVE_LLM=1` 时启用。
+- Vision test 的 PNG：用 Pillow 生成一个 100x100 红色方块，不依赖文件系统。
+- 断言 `ChatResponse.content` 非空 + `ChatResponse.usage` 有 `prompt_tokens` 和 `completion_tokens`。
+
+---
+
+# Phase P3：OSWorld 解耦 + 抽象层
+
+## Step P3.1：`strata/env/osworld_client.py` —— HTTP Client 提取
+
+**目标**：把 `_OSWorldHTTPClient` 从 `gui_osworld.py` 提取到独立模块，加入 `OSWorldRawClient`（来自 `osworld_smoke.py` 的 `/execute` 调用能力）。`gui_osworld.py` 和 `recorder.py` 改从新位置 import。
+
+**新建文件**：`strata/env/osworld_client.py`
+**修改文件**：`strata/env/gui_osworld.py`、`scripts/osworld_smoke.py`
+
+**先读文件清单**：
+- `strata/env/gui_osworld.py:28-65`（`_OSWorldHTTPClient` 完整实现）
+- `scripts/osworld_smoke.py:40-64`（`OSWorldRawClient` 实现）
+
+**API 规格**：
+
+```python
+# strata/env/osworld_client.py
+
+class OSWorldHTTPClient:
+    """HTTP client for OSWorld Docker server — used by GUI adapter, recorder, task runner."""
+    def __init__(self, base_url: str, timeout: float) -> None: ...
+    def post_json(self, path: str, payload: dict[str, object]) -> dict[str, object]: ...
+    def post_form_get_bytes(self, path: str, fields: dict[str, str]) -> bytes: ...
+    def get_bytes(self, path: str) -> bytes: ...
+    def execute_shell(self, command: str) -> dict[str, object]: ...
+    def run_python(self, code: str) -> dict[str, object]: ...
+    def health_check(self) -> bool: ...
+```
+
+**契约**：
+- `__init__.require`：`base_url` 非空且以 `http` 开头。
+- `execute_shell.require`：`command` 非空。
+- `run_python.require`：`code` 非空。
+- `health_check.ensure`：不抛异常（内部 catch 返回 bool）。
+
+**验证矩阵**：
+- **L0**：公有 API 签名 mypy 覆盖。从 `_OSWorldHTTPClient`（下划线前缀私有）升级为 `OSWorldHTTPClient`（公有）。
+- **L1**：4 个契约。
+- **L3**：
+  - `test_post_json_success`（mock urllib）
+  - `test_post_json_connection_error_wraps`
+  - `test_execute_shell_sends_correct_payload`
+  - `test_run_python_sends_correct_payload`
+  - `test_health_check_returns_true_on_reachable`
+  - `test_health_check_returns_false_on_unreachable`
+
+**Strategy 变更**：无。
+
+**异常设计**：复用 `OSWorldConnectionError`。
+
+**依赖标注**：无依赖。
+
+**Review 检查项**：
+- `gui_osworld.py` 改为 `from strata.env.osworld_client import OSWorldHTTPClient`，内部 `self._client` 类型更新。
+- `osworld_smoke.py` 的 `OSWorldRawClient` 删除，改用 `OSWorldHTTPClient.execute_shell`。
+- `_OSWorldHTTPClient` 的下划线前缀移除——它现在是公有 API（recorder、run_tasks、smoke 都需要）。
+- `post_form_get_bytes` 保持与原始签名一致。
+
+---
+
+## Step P3.2：`RemoteCodeRunner` Protocol + Recorder 解耦
+
+**目标**：`recorder.py` 不再 import `_OSWorldHTTPClient` / `osworld_client`，改为依赖 `RemoteCodeRunner` Protocol。OSWorld 特化由构造时注入。
+
+**修改文件**：`strata/observability/recorder.py`
+
+**先读文件清单**：
+- `strata/observability/recorder.py`（全读）
+- Step P3.1 的 `strata/env/osworld_client.py`
+
+**API 规格**：
+
+```python
+# strata/observability/recorder.py 新增
+
 @runtime_checkable
-class TrajectoryRecorder(Protocol):
-    def start(self, run_id: str) -> None: ...
-    def stop(self) -> None: ...
-    def note_keyframe(self, label: str) -> None: ...
-    def note_event(self, kind: str, payload: Mapping[str, object]) -> None: ...
+class RemoteCodeRunner(Protocol):
+    """Minimal contract for running code on a remote machine."""
+    def run_python(self, code: str) -> dict[str, object]: ...
+    def post_form_get_bytes(self, path: str, fields: dict[str, str]) -> bytes: ...
+    def get_bytes(self, path: str) -> bytes: ...
 
 class OSWorldFFmpegRecorder:
     def __init__(
         self,
-        osworld: OSWorldConfig,
-        gui: IGUIAdapter,
+        runner: RemoteCodeRunner,      # 替换 osworld_config
+        screen_size: tuple[int, int],   # 替换 osworld_config.screen_size
         out_dir: Path,
         fps: int = 30,
     ) -> None: ...
-
-class NullRecorder:
-    # 全 noop 实现，osworld.enabled=false 时使用
-    ...
 ```
 
-**关键实现约束**：
-- HTTP 访问复用新增的 `_OSWorldHTTPClient.post_form_get_bytes(path, fields)`（见下 "异常设计"）；避免 `OSWorldGUIAdapter._client` 被外部模块直接戳。
-- `start()` 调用链：
-  1. `POST /run_python` 下发 `rm -rf /tmp/strata_rec`。
-  2. `POST /run_python` 下发 `subprocess.Popen(["ffmpeg", "-f", "x11grab", ..., f"/tmp/strata_rec/{run_id}.mp4"])`，写 `.pid` 到 `/tmp/strata_rec/{run_id}.pid`。
-- `stop()` 调用链：
-  1. `POST /run_python` 下发 `os.kill(pid, signal.SIGINT); time.sleep(2)` 等 mp4 flush。
-  2. `POST /file` form-encoded 拉 mp4 bytes，写到 `out_dir / "osworld.mp4"`。
-  3. `POST /run_python` 下发 `rm -rf /tmp/strata_rec`。
-  4. 写 `events.jsonl`。
-- `note_keyframe(label)`：`gui.capture_screen()` → `out_dir / screenshots / f"{label}.png"`；**不走 GUILock**（screenshot 是只读）。
-- `note_event(kind, payload)`：append 一行 JSON 到 `out_dir / events.jsonl`，字段 `{ts, kind, payload}`。
-
 **契约**：
-- `OSWorldFFmpegRecorder.__init__.require`：`osworld.enabled == True`；`fps in [1, 60]`。
-- `start.require`：`run_id` 符合 `^[a-zA-Z0-9_-]+$`（禁止 shell 注入）。
-- `stop.ensure`：如果 `start` 曾调用成功，则 `out_dir / "osworld.mp4"` 存在（大小可以是 0，比如 ffmpeg 立刻失败，但文件必须落盘以示 "尝试过"）。
-- `note_event.require`：`kind` 非空。
+- `__init__.require`：`1 <= fps <= 60`；`screen_size[0] > 0 and screen_size[1] > 0`。
+- `start.require`：`run_id` 匹配 `^[a-zA-Z0-9_-]+$`（不变）。
 
 **验证矩阵**：
-- **L0**：Protocol `TrajectoryRecorder` 的 `NullRecorder` / `OSWorldFFmpegRecorder` 结构性实现覆盖。
-- **L1**：4 个契约。
-- **L3**（全部 mock `_OSWorldHTTPClient`）：
-  - `test_recorder_start_spawns_ffmpeg_via_run_python`
-  - `test_recorder_stop_sends_sigint_and_downloads_mp4`
-  - `test_recorder_stop_always_writes_mp4_file_even_on_http_error`
-  - `test_keyframe_writes_png_under_screenshots_dir`
-  - `test_note_event_appends_jsonl`
-  - `test_null_recorder_is_noop_under_protocol`
-  - `test_recorder_refuses_run_id_with_shell_chars`
-  - `test_recorder_handles_consecutive_http_failures_by_disabling_itself`
+- **L0**：`RemoteCodeRunner` Protocol 类型检查；`NullRecorder` / `OSWorldFFmpegRecorder` 满足 `TrajectoryRecorder`。
+- **L1**：2 个契约（`fps`、`run_id`）。
+- **L3**：
+  - `test_recorder_accepts_mock_runner`
+  - `test_recorder_start_calls_run_python`
+  - `test_recorder_stop_downloads_mp4_via_runner`
+  - `test_recorder_refuses_bad_run_id`
+  - `test_null_recorder_satisfies_protocol`
 
 **Strategy 变更**：无。
 
-**异常设计**：
-- 新增 `RecorderError(HarnessError)`：构造失败（osworld 连接不通）时抛出，但 orchestrator 层捕获后降级 `NullRecorder`。
-- **I/O 连续失败 3 次后自 disable**——内部计数器 `_failures`；之后 `start/stop/note_*` 全部 early-return。
-- `_OSWorldHTTPClient.post_form_get_bytes` 新方法：构造 `urllib.parse.urlencode(fields).encode()` 发 `application/x-www-form-urlencoded` POST，返回 body bytes。本次在 `strata/env/gui_osworld.py` 扩展该私有类（非公开 API 改动）。
+**异常设计**：`RecorderError`（已有）保留。
 
-**依赖标注**：依赖 Step P1.1（拿 `out_dir=layout.recordings_dir`）。
+**依赖标注**：依赖 Step P3.1。
 
 **Review 检查项**：
-- ffmpeg 命令**必须 preset=ultrafast + pix_fmt=yuv420p**，否则 h264 默认 preset 慢到录屏卡顿，且 yuv420p 是播放器兼容性底线。
-- `run_id` 里禁止 `"` `'` `$` `\\` 等 shell 元字符——`_run_python` 虽然是 Python eval 不是 shell，但我们构造 Python 字符串字面量时仍需转义；简单起见用白名单正则。
-- `SIGINT` 不是 `SIGTERM`——实测 SIGTERM 会产生无 moov atom 的损坏 mp4，SIGINT 会让 ffmpeg 走正常 flush 路径。
-- `stop()` **必须幂等**：重复调用不抛异常（连续 Gate Check / KeyboardInterrupt 场景）。
-- 30 fps × 1080p × libx264 ultrafast 实测 ~10 MB/分钟——goal 默认 `timeout_s=120` 即 20 MB/run；`keep_last_runs=5` → 磁盘占用约 100 MB 天花板（符合讨论文档 §6 的预算）。
+- `recorder.py` 的 `from strata.env.gui_osworld import _OSWorldHTTPClient` 必须被完全移除。
+- `recorder.py` 不再 import 任何 `strata.env.*` 模块——观测层 → env 层的反向依赖彻底切断。
+- `OSWorldConfig` import 也移除——recorder 只需要 `screen_size` 和 `runner`。
 
 ---
 
-## Step P2.4：Orchestrator 接入 sink + recorder
+## Step P3.3：Orchestrator os_type 解耦 + recorder 构造解耦
 
-**目标**：把 P2.1–P2.3 的组件注入 `AgentOrchestrator`，在 `run_goal` 生命周期挂钩点调用。
+**目标**：`_plan()` 里的 os_type 不再读 `config.osworld.os_type`；`_build_recorder` 不再直接 import `OSWorldFFmpegRecorder`。
 
 **修改文件**：`strata/harness/orchestrator.py`
 
 **先读文件清单**：
-- `strata/harness/orchestrator.py`（全读）
-- Step P1.3 的交付物
+- `strata/harness/orchestrator.py:317-344`（`_plan` 方法）
+- `strata/harness/orchestrator.py:281-297`（`_build_recorder` 方法）
+- `strata/harness/orchestrator.py:56-64`（import 段）
 
 **API 规格**：
 
 ```python
-class AgentOrchestrator:
-    def __init__(
-        self,
-        config: StrataConfig,
-        bundle: EnvironmentBundle,
-        ui: AgentUI,
-        llm_router: LLMRouter | None = None,
-        executor: TaskExecutor | None = None,
-        layout: RunDirLayout | None = None,
-        transcript_sink: ChatTranscriptSink | None = None,   # 新
-        recorder: TrajectoryRecorder | None = None,          # 新
-    ) -> None: ...
-```
+# orchestrator.py 修改
 
-**生命周期挂钩**：
-```
-run_goal(goal):
-    layout = self._layout or RunDirLayout.create(config.paths, goal)
-    sink   = self._sink or FileChatTranscriptSink(layout.llm_dir) if enabled else NullTranscriptSink
-    recorder = self._recorder or (
-        OSWorldFFmpegRecorder(config.osworld, bundle.gui, layout.recordings_dir, fps=30)
-        if config.osworld.enabled else NullRecorder()
-    )
-    recorder.start(run_id)
-    try:
-        ... 原有流程 ...
-        recorder.note_event("plan_ready", {"tasks": len(graph.tasks)})
-        ... run_tasks ...
-        recorder.note_event("task_state", {"id": tid, "state": new_state})
-        ... 每个 task 执行前 / 后 ...
-        recorder.note_keyframe(f"step_{seq:04d}_pre")
+def _plan(self, goal: str) -> TaskGraph:
+    plan_context: dict[str, object] = {
+        "os_type": self._resolve_os_type(),  # 新私有方法
         ...
-    finally:
-        recorder.stop()
-        layout.write_manifest(goal, config_snapshot, started_at)
-        if result.final_state == "COMPLETED":
-            gc_old_runs(layout.run_root, config.paths.keep_last_runs)
+    }
+    ...
+
+def _resolve_os_type(self) -> str:
+    """Return OS type for plan context.
+    OSWorld enabled → config.osworld.os_type; else → platform.system()."""
+    ...
+
+def _build_recorder(self, layout: RunDirLayout | None) -> TrajectoryRecorder:
+    """Recorder construction now fully delegated to injected factory or NullRecorder."""
+    if self._recorder is not None:
+        return self._recorder
+    # OSWorld recorder construction moves to factory/caller
+    return NullRecorder()
 ```
 
 **契约**：不变。
 
 **验证矩阵**：
-- **L3**（既有 + 新增）：
-  - `test_orchestrator_starts_and_stops_recorder`（用 mock recorder 断言 start/stop 调用次数）
-  - `test_orchestrator_calls_sink_through_router`（间接：注入 router with mock sink）
-  - `test_orchestrator_fails_gracefully_when_recorder_errors`
-  - `test_orchestrator_writes_manifest_on_run_end`
-  - `test_orchestrator_runs_gc_only_on_success`
-  - 全部既有 `test_harness/test_orchestrator.py` 回绿
+- **L0**：`_resolve_os_type` 返回 `str`。import 段不再有 `OSWorldFFmpegRecorder`。
+- **L3**：
+  - `test_plan_context_os_type_from_platform_when_osworld_disabled`
+  - `test_plan_context_os_type_from_config_when_osworld_enabled`
+  - `test_build_recorder_returns_null_when_no_injection`
+  - 全部既有 `test_orchestrator.py` 回绿
 
 **Strategy 变更**：无。
 
-**异常设计**：
-- `recorder.start()` 抛 `RecorderError` → 不影响主流程，替换为 `NullRecorder` 继续；stderr warning。
-- `recorder.stop()` 抛异常 → 吞掉，`finally` 继续 `write_manifest` / `gc`。
+**异常设计**：无。
 
-**依赖标注**：依赖 P2.1 + P2.2 + P2.3。
+**依赖标注**：依赖 Step P3.2。
 
 **Review 检查项**：
-- `run_goal` 的 `finally` 块是**全链路 best-effort**：`recorder.stop`、`write_manifest`、`gc_old_runs` 三者互不影响，任一失败不能遮盖原始 goal 结果。
-- `keyframe` 最少量：只在 `task_state transition` 且 `new_state in (SUCCEEDED, FAILED)` 时拍；不在每个 action 前都拍（30 fps 视频已经覆盖了）。
-- 注入优先级：构造参数 > 默认构造。测试只需传 mock 即可绕过 HTTP/ffmpeg。
+- `from strata.observability.recorder import OSWorldFFmpegRecorder` 从 orchestrator 的 import 段移除。
+- `NullRecorder` import 保留（default fallback）。
+- Recorder 注入由调用方（`__main__.py` / `scripts/agent_e2e.py`）负责构造——如果 OSWorld enabled，调用方构造 `OSWorldFFmpegRecorder(runner=OSWorldHTTPClient(...), ...)`，注入给 orchestrator。
+- `_build_recorder` 简化为：注入优先 → NullRecorder 兜底。
 
 ---
 
-# Phase P3：题目协议 + 批量执行器
+## Step P3.4：Factory 抽象层整理 + LinuxGUIAdapter 错误改善
 
-## Step P3.1：`TaskFile` 数据类 + TOML loader
+**目标**：清理 factory 的双路分发；改善非 OSWorld 路径的错误消息；为未来 macOS 支持预留扩展点。
 
-**目标**：定义声明式题目格式的 Python 对应。
-
-**新建文件**：`strata/tasks.py`
+**修改文件**：`strata/env/factory.py`、`strata/env/linux/gui.py`
 
 **先读文件清单**：
-- `strata/core/config.py`（TOML 解析范式）
+- `strata/env/factory.py`（全读）
+- `strata/env/linux/gui.py`（全读）
 
 **API 规格**：
 
 ```python
-@dataclass(frozen=True)
-class SetupSpec:
-    target: Literal["host", "osworld"]
-    commands: Sequence[str]
+# factory.py — 清理后
 
-@dataclass(frozen=True)
-class VerifySpec:
-    target: Literal["host", "osworld"]
-    command: str
-    expected_stdout_regex: str | None
-    expected_exit_code: int | None
+class EnvironmentFactory:
+    @staticmethod
+    def create(config: StrataConfig) -> EnvironmentBundle:
+        """Build EnvironmentBundle.
 
-@dataclass(frozen=True)
-class TaskFile:
-    id: str
-    goal: str
-    tags: Sequence[str]
-    timeout_s: float
-    max_iterations: int | None
-    setup: SetupSpec | None
-    verify: VerifySpec | None
-    source_path: Path
+        Dispatch:
+        - osworld.enabled=True → OSWorldGUIAdapter (any platform)
+        - osworld.enabled=False + Linux + DISPLAY → LinuxGUIAdapter (future)
+        - otherwise → UnsupportedPlatformError with actionable message
+        """
+        ...
 
-    @classmethod
-    def load(cls, path: Path) -> TaskFile: ...
-    @classmethod
-    def load_many(cls, paths: Sequence[Path]) -> Sequence[TaskFile]: ...
+# linux/gui.py — 错误消息改善
+
+class LinuxGUIAdapter:
+    def __init__(self) -> None:
+        raise UnsupportedPlatformError(
+            "Native Linux GUI backend not yet implemented. "
+            "Options: (1) set osworld.enabled=true in config.toml "
+            "and start an OSWorld Docker container; "
+            "(2) wait for Phase 12+ native backend."
+        )
 ```
 
-**契约**：
-- `TaskFile.load.require`：`path` 存在且是 `.toml`。
-- `TaskFile.__post_init__` 或 loader 内：
-  - `id` 匹配 `^[a-z0-9][a-z0-9-]{0,62}$`。
-  - `goal` 非空。
-  - `timeout_s > 0`。
-  - `verify.expected_stdout_regex` 或 `expected_exit_code` 至少一个。
-- `load_many.ensure`：返回列表中 `id` 唯一。
+**契约**：不变。
 
 **验证矩阵**：
-- **L0**：`Literal["host","osworld"]` 覆盖。
-- **L1**：4 个 loader 契约。
-- **L2**：`test_taskfile_roundtrip`：任意 `TaskFile` 序列化回 TOML 再 `load()` 等值（Hypothesis 策略见下）。
 - **L3**：
-  - `test_load_minimal_task`
-  - `test_load_full_task_with_setup_and_verify`
-  - `test_rejects_bad_id_character`
-  - `test_rejects_empty_goal`
-  - `test_load_many_detects_duplicate_id`
-  - `test_verify_spec_requires_at_least_one_expectation`
+  - `test_factory_osworld_enabled_creates_osworld_adapter`（mock HTTP）
+  - `test_factory_osworld_disabled_on_linux_raises_with_actionable_message`
+  - `test_factory_non_linux_raises_with_actionable_message`
 
-**Strategy 变更**：`tests/strategies.py` 新增 `task_file_strategy`——仅限 L2 round-trip 用。
+**Strategy 变更**：无。
 
-**异常设计**：新增 `TaskFileError(StrataError)`：TOML 解析失败 / 字段非法。
+**异常设计**：无。
 
-**依赖标注**：无依赖。
+**依赖标注**：依赖 Step P3.1（import 路径变更）。
 
 **Review 检查项**：
-- `source_path` 字段：`load()` 填充，后续 `run_tasks` 报告里引用。
-- `SetupSpec.target` 和 `VerifySpec.target` 字段默认值：`"host"`（host shell 是最简单的校验方式）。
-- 不引入 YAML，TOML 足够；保持与 `config.toml` 工具链一致。
+- 错误消息必须包含具体解决步骤（不是泛泛"not supported"）。
+- Factory 的注释标明 macOS 扩展点位置。
+- CONVENTION 注释：`# CONVENTION: LinuxGUIAdapter stub — Phase 12+ 实装 pyautogui/xdotool 后端。headless 服务器请用 OSWorld。`
 
 ---
 
-## Step P3.2：`scripts/run_tasks.py` 批量执行器
+# Phase P4：端到端验收
 
-**目标**：CLI 入口，对一批题目跑 `setup → run_goal → verify`，写聚合报告。
+## Step P4.1：`tests/e2e/test_e2e_tasks.py` —— 真实题目执行
 
-**新建文件**：`scripts/run_tasks.py`
+**目标**：用 `run_tasks.py` 的核心逻辑执行 `create-hello-txt` 和 `read-hostname`，验证 verdict 和 report。
+
+**新建文件**：`tests/e2e/test_e2e_tasks.py`
 
 **先读文件清单**：
-- `scripts/agent_e2e.py`（复用 `AutoUI` / `_summarize` 模式）
-- Step P3.1 交付物
+- `scripts/run_tasks.py`（全读）
+- `tasks/create-hello-txt.toml`（修正后）
+- `tasks/read-hostname.toml`（修正后）
+- Step P2.1 的 `_run_single` 新签名
 
-**API 规格**：
+**API 规格**：纯测试文件。
 
-```python
-def main(argv: Sequence[str]) -> int: ...
+**验证矩阵**：
+- **L3**：
+  - `test_create_hello_txt_e2e`（`@pytest.mark.integration` + `@pytest.mark.live_llm`，真实 OSWorld + 真实 LLM → verdict=PASS 或 FAIL with meaningful error）
+  - `test_read_hostname_e2e`（同上）
+  - `test_report_json_written_and_valid`（执行后 reports/ 下有 JSON）
 
-# 内部
-def _run_single(task: TaskFile, config: StrataConfig, bundle: EnvironmentBundle) -> TaskReport: ...
-def _run_shell(target: Literal["host","osworld"], command: str, bundle: EnvironmentBundle, timeout: float) -> ShellResult: ...
-def _write_report(tasks: Sequence[TaskReport], out_dir: Path) -> Path: ...
+**Strategy 变更**：无。
 
-@dataclass(frozen=True)
-class TaskReport:
-    task_id: str
-    goal: str
-    verdict: Literal["PASS", "FAIL", "ERROR", "TIMEOUT"]
-    duration_s: float
-    run_dir: str
-    setup_output: str | None
-    verify_output: str | None
-    error: str | None
-```
+**异常设计**：无。
 
-**CLI**：
+**依赖标注**：依赖 Phase P1 + P2 + P3 全部完成。
+
+**Review 检查项**：
+- 测试标记 `@pytest.mark.integration` + `@pytest.mark.live_llm`，仅在环境完备时执行。
+- 如果 agent 未能 COMPLETED goal，测试应该 **不 assert PASS**——而是断言 verdict 是合法值（PASS/FAIL/ERROR/TIMEOUT）+ report 结构完整。真正的 PASS 是后续调优的事。
+- timeout：单题 180s（给 LLM 规划 + 执行足够时间）。
+
+---
+
+## Step P4.2：手动 Smoke 验收
+
+**目标**：在 Phase Gate 之后，手动执行完整 smoke：
+
 ```bash
-uv run python scripts/run_tasks.py tasks/foo.toml tasks/bar.toml
-uv run python scripts/run_tasks.py 'tasks/*.toml'
-uv run python scripts/run_tasks.py --tag smoke
-uv run python scripts/run_tasks.py --config ./config.toml --report-dir reports/
+# 1. Health check
+uv run strata --config ./config.toml  # 应该显示连接状态
+
+# 2. 单题执行
+uv run python scripts/run_tasks.py tasks/create-hello-txt.toml --config ./config.toml
+
+# 3. 批量执行
+uv run python scripts/run_tasks.py 'tasks/*.toml' --config ./config.toml
+
+# 4. 检查产物
+ls .strata-run/current/
+cat reports/*.json | python -m json.tool
 ```
 
-**契约**：
-- `main.require`：至少提供一个 task 文件路径或 `--tag`。
-- `_run_shell.require`：`timeout > 0`；`target` 合法。
-- `_write_report.ensure`：输出文件为 JSON，包含所有 `TaskReport` 字段。
-
 **验证矩阵**：
-- **L0**：CLI 参数用 `argparse` + typed namespace。
-- **L1**：3 个契约。
-- **L3**：
-  - `test_run_shell_host_executes_and_matches_regex`
-  - `test_run_shell_osworld_dispatches_to_run_python`（mock OSWorld）
-  - `test_single_task_end_to_end_with_mock_orchestrator`
-  - `test_report_json_schema`
-  - `test_glob_expansion_finds_task_files`
-  - `test_tag_filter_selects_matching_tasks`
-
-**Strategy 变更**：无（复用 Step P3.1 的 strategy）。
-
-**异常设计**：复用 `TaskFileError` + `HarnessError`；CLI 层翻译为 exit code（0=全通过，1=有失败，2=ERROR）。
-
-**依赖标注**：依赖 Step P3.1 + Phase P2（run_tasks 依赖 orchestrator 能产出轨迹包）。
-
-**Review 检查项**：
-- **每题独立 orchestrator 实例**：`config.toml` 只加载一次，但每道题要新 `RunDirLayout` + 新 audit logger，避免跨题污染。
-- `setup` 失败 → 题目 verdict=`ERROR`，不进入 `run_goal`；`verify` 失败 → verdict=`FAIL`。
-- OSWorld `setup/verify` 用 `_run_python` 跑；host 用 `subprocess.run` 带 timeout。
-- Report JSON 格式要兼容 `jq` 过滤（扁平数组 + 每项一 object）；不嵌套。
-
----
-
-## Step P3.3：样例题目 + TEMPLATE
-
-**目标**：从 `agent_e2e.DEFAULT_GOALS` 迁移三题；提供模板。
-
-**新建文件**：
-- `tasks/TEMPLATE.toml`
-- `tasks/create-hello-txt.toml`
-- `tasks/list-tmp-count.toml`
-- `tasks/read-hostname.toml`
-
-**API 规格**：纯数据文件。
-
-**验证矩阵**：
-- **L3**：`test_sample_tasks_parse_with_taskfile_load`（pytest 断言 `tasks/*.toml` 全部能被 `TaskFile.load` 解析）。
+- **L3**：无自动化测试（手工）。验收标准：
+  - Health check 打印所有组件状态 + latency
+  - 至少 1 道题 verdict 非 ERROR（agent 成功启动并尝试执行）
+  - `reports/*.json` 结构完整
 
 **Strategy 变更**：无。
 
-**依赖标注**：依赖 Step P3.1。
+**依赖标注**：依赖 Step P4.1。
 
-**Review 检查项**：
-- 三题 `verify` 要真实可校验：
-  - `create-hello-txt`：`verify.command="cat /tmp/strata_e2e_hello.txt"`、`expected_stdout_regex="^hello\\n?$"`。
-  - `list-tmp-count`：`verify` 走 host shell `ls /tmp | wc -l`，但这题无法 deterministic 校验（跟 OSWorld 当前 `/tmp` 状态耦合），改为**仅看 goal 是否 COMPLETED**，`verify` 段省略。
-  - `read-hostname`：`verify.command="cat /etc/hostname"`、`expected_exit_code=0`。
-- `TEMPLATE.toml` 含所有字段 + 注释，能 `cp` 即改。
-
----
-
-## Step P3.4：`tasks/README.md`
-
-**目标**：写题教程——格式、示例、执行命令、debug 流程。
-
-**新建文件**：`tasks/README.md`
-
-**内容大纲**：
-1. 题目文件格式（逐字段说明）。
-2. 两种 target 的差异（host vs osworld）。
-3. 编写范式：先写 goal；再决定是否需要 setup（避免跨题污染）；再写 verify（deterministic）。
-4. 执行命令三种（单题 / 批量 / 按 tag）。
-5. Debug 流程：看 `.strata-run/current/recordings/osworld.mp4`、`llm/*.json`、`audit.jsonl`、`events.jsonl`。
-6. FAQ：如何给某题临时加长 timeout；如何只重跑上次失败的题。
-
-**验证矩阵**：
-- **L3**：无自动化测试（文档）。手工验收：另一个不熟悉项目的读者能照做跑通一道自定义题。
-
-**Strategy 变更**：无。
-
-**依赖标注**：依赖 P3.1–P3.3（需要所有字段和命令都固化后再写文档）。
-
-**Review 检查项**：不写死任何版本号；命令全部可复制粘贴。
+**Review 检查项**：结果截图 / 终端输出保存为记录。
 
 ---
 
@@ -797,59 +704,71 @@ uv run python scripts/run_tasks.py --config ./config.toml --report-dir reports/
 
 | Module | 新增 L0 | 新增 L1 | 新增 L2 | 新增 L3 | 合计 |
 |---|---|---|---|---|---|
-| `strata/paths.py` | 3 | 4 | 1 | 5 | 13 |
-| `strata/core/config.py` | 1 | 2 | 0 | 4 | 7 |
-| `strata/harness/orchestrator.py` | 1 | 1 | 0 | 5 | 7 |
-| `strata/observability/transcript.py` | 3 | 4 | 0 | 5 | 12 |
-| `strata/llm/router.py` | 1 | 1 | 0 | 4 | 6 |
-| `strata/observability/recorder.py` | 3 | 4 | 0 | 8 | 15 |
-| `strata/tasks.py` | 2 | 4 | 1 | 6 | 13 |
-| `scripts/run_tasks.py` | 3 | 3 | 0 | 6 | 12 |
-| **合计** | **17** | **23** | **2** | **43** | **85** |
+| `strata/health.py` | 2 | 3 | 0 | 6 | 11 |
+| `strata/__main__.py` + scripts | 1 | 0 | 0 | 2 | 3 |
+| `tests/conftest.py` + `e2e/conftest.py` | 1 | 0 | 0 | 0 | 1 |
+| `scripts/run_tasks.py` | 1 | 2 | 0 | 4 | 7 |
+| `tasks/*.toml` | 0 | 0 | 0 | 2 | 2 |
+| `tests/e2e/test_live_llm.py` | 0 | 0 | 0 | 3 | 3 |
+| `strata/env/osworld_client.py` | 2 | 4 | 0 | 6 | 12 |
+| `strata/observability/recorder.py` | 2 | 2 | 0 | 5 | 9 |
+| `strata/harness/orchestrator.py` | 1 | 0 | 0 | 4 | 5 |
+| `strata/env/factory.py` + `linux/gui.py` | 0 | 0 | 0 | 3 | 3 |
+| `tests/e2e/test_e2e_tasks.py` | 0 | 0 | 0 | 3 | 3 |
+| **合计** | **10** | **11** | **0** | **38** | **59** |
 
 ---
 
 ## 执行流水线
 
 ```
-Phase P1:
-  P1.1W → P1.1R → [Retry≤3] → Gate (mypy + pytest) → Commit on phase/8-runinfra
+Phase P1 — 连接验证层:
+  P1.1W → P1.1R → [Retry≤3] → Gate (mypy + pytest) → Commit on phase/9-e2e-decouple
   P1.2W → P1.2R → [Retry≤3] → Gate → Commit
   P1.3W → P1.3R → [Retry≤3] → Gate → Commit
-  P1.4W → P1.4R → Gate → Commit
-  Phase Gate: full mypy --strict . && pytest -q && ruff check . && ruff format --check .
-  Push phase/8-runinfra
+  Phase Gate: mypy --strict . && pytest -q && ruff check . && ruff format --check .
+  ★ 里程碑：uv run strata --config ./config.toml 能打印 health check 结果
+  Push phase/9-e2e-decouple
 
-Phase P2:
+Phase P2 — 端到端通路:
   P2.1W → P2.1R → [Retry≤3] → Gate → Commit
   P2.2W → P2.2R → [Retry≤3] → Gate → Commit
   P2.3W → P2.3R → [Retry≤3] → Gate → Commit
-  P2.4W → P2.4R → [Retry≤3] → Gate → Commit
-  Phase Gate: full stack + 手工 smoke: uv run python scripts/agent_e2e.py，验收
-              .strata-run/runs/<latest>/{recordings/osworld.mp4, llm/*.json, events.jsonl} 齐全
+  Phase Gate: full stack
+  ★ 里程碑：STRATA_LIVE_LLM=1 pytest tests/e2e/test_live_llm.py -v 通过
   Push
 
-Phase P3:
+Phase P3 — OSWorld 解耦:
   P3.1W → P3.1R → [Retry≤3] → Gate → Commit
   P3.2W → P3.2R → [Retry≤3] → Gate → Commit
-  P3.3W → P3.3R → Gate → Commit
-  P3.4W → P3.4R → Gate → Commit
-  Phase Gate: full stack + 手工 smoke: uv run python scripts/run_tasks.py tasks/*.toml
-              三题全 PASS，reports/*.json 结构完整
+  P3.3W → P3.3R → [Retry≤3] → Gate → Commit
+  P3.4W → P3.4R → [Retry≤3] → Gate → Commit
+  Phase Gate: full stack + recorder.py 的 import 中不含 strata.env.gui_osworld
+  ★ 里程碑：grep -r "gui_osworld" strata/observability/ 返回空
+  Push
+
+Phase P4 — 端到端验收:
+  P4.1W → P4.1R → [Retry≤3] → Gate → Commit
+  P4.2 手工验收
+  Phase Gate: full stack + 手工 smoke
+  ★ 里程碑：uv run python scripts/run_tasks.py tasks/create-hello-txt.toml 有输出
   Push；合入 main
 ```
 
 **熔断策略**（workspace 规则）：
 - 单 Step 的 Write→Review 循环 ≤ 3 次；第 4 次失败交人类介入。
 - 任何 Phase Gate 失败先定位到具体 Step 回滚 commit，不推进下一 Phase。
-- 观测层 Phase（P2）允许**只接线不验证**降级：如果 live OSWorld 偶发网络抖动导致 smoke 失败 ≥ 2 次，暂停 Phase，检查 `audit.jsonl`——**观测层 bug 永远比底层连接 bug 优先级低**。
+- LLM live 测试偶发超时 → 重试 1 次；连续 2 次失败暂停 Phase 检查 API key / 网络。
+- OSWorld 容器连接失败 → 检查 `docker ps`，确认容器运行后重试。
 
 ---
 
 ## 交付验收标准（整个计划完成后）
 
-1. **`rm -rf .strata-run/` 一键清理**所有运行期产物；`git status` 干净。
-2. **任意一题失败后**可以从 `.strata-run/current/recordings/osworld.mp4` 回放；`jq . .strata-run/current/llm/*_req.json` 看到完整 prompt 和图片文件名。
-3. **`uv run python scripts/run_tasks.py tasks/*.toml`** 退出码反映 PASS/FAIL 情况；`reports/<时间戳>.json` 聚合结果可以 `jq` 过滤。
-4. **向后兼容**：旧 `~/.strata/config.toml` 不含 `[paths]` 段的用户能直接 upgrade，不改配置也能跑——只是产物仍落旧路径，新 feature 需要显式启用。
-5. **`mypy --strict .`** 零错误；**`pytest -q`** 全绿（预计 ~500 测试）；**`ruff check .`** 零警告。
+1. **`uv run strata --config ./config.toml`** 启动时打印所有组件 health check 状态 + latency；LLM 不可用时 exit 1。
+2. **`uv run python scripts/run_tasks.py tasks/create-hello-txt.toml`** 能执行（无论 PASS/FAIL），`reports/*.json` 结构完整。
+3. **`strata/observability/recorder.py` 不 import `strata.env.gui_osworld`**——观测层与 env 层解耦。
+4. **`strata/harness/orchestrator.py` 不 import `OSWorldFFmpegRecorder`**——核心循环与 OSWorld 解耦。
+5. **`STRATA_LIVE_LLM=1 uv run pytest tests/e2e/test_live_llm.py -v`** 全绿。
+6. **`mypy --strict .`** 零错误；**`pytest -q`** 全绿；**`ruff check .`** 零警告。
+7. **CONVENTION 注释记录**：A11y ABANDONED；LinuxGUIAdapter stub → Phase 12+；GUI 抽象层为 macOS 预留。

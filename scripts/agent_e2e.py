@@ -115,6 +115,15 @@ DEFAULT_GOALS: tuple[str, ...] = (
 
 def main(goals: list[str]) -> int:
     cfg = load_config("./config.toml")
+
+    from strata.health import check_all, require_healthy
+
+    statuses = check_all(cfg)
+    for s in statuses:
+        mark = "+" if s.ok else "!"
+        print(f"[{mark}] {s.component}: {s.detail} ({s.latency_ms:.0f}ms)")
+    require_healthy(statuses)
+
     print(f"[+] planner -> {cfg.roles.planner}  (model={cfg.providers[cfg.roles.planner].model})")
     print(f"[+] vision  -> {cfg.roles.vision}  (model={cfg.providers[cfg.roles.vision].model})")
     print(f"[+] OSWorld server = {cfg.osworld.server_url} (enabled={cfg.osworld.enabled})")

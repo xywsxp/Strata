@@ -45,6 +45,14 @@ def main() -> None:
         print(f"[Strata] Config error: {redact(str(exc))}", file=sys.stderr)
         sys.exit(1)
 
+    from strata.health import check_all, require_healthy
+
+    statuses = check_all(config)
+    for s in statuses:
+        mark = "+" if s.ok else "!"
+        print(f"[{mark}] {s.component}: {s.detail} ({s.latency_ms:.0f}ms)")
+    require_healthy(statuses)
+
     try:
         bundle = EnvironmentFactory.create(config)
     except StrataError as exc:
