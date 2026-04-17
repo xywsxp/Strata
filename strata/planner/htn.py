@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 from collections.abc import Mapping, Sequence
 from typing import Final
 
@@ -88,11 +89,11 @@ def _detect_cycles(tasks: Sequence[TaskNode]) -> list[str]:
                 adj[dep].append(task.id)
                 in_degree[task.id] += 1
 
-    queue = [tid for tid, deg in in_degree.items() if deg == 0]
+    queue = deque(tid for tid, deg in in_degree.items() if deg == 0)
     visited = 0
 
     while queue:
-        node = queue.pop(0)
+        node = queue.popleft()
         visited += 1
         for neighbor in adj[node]:
             in_degree[neighbor] -= 1

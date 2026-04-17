@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import sys
 
+import icontract
+
 from strata.core.config import StrataConfig
 from strata.core.errors import UnsupportedPlatformError
 from strata.env.protocols import EnvironmentBundle
@@ -19,6 +21,10 @@ from strata.env.protocols import EnvironmentBundle
 
 class EnvironmentFactory:
     @staticmethod
+    @icontract.ensure(
+        lambda result: isinstance(result, EnvironmentBundle),
+        "must return EnvironmentBundle",
+    )
     def create(config: StrataConfig) -> EnvironmentBundle:
         """Build an EnvironmentBundle for the current platform.
 

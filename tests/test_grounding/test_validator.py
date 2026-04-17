@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import icontract
 import pytest
 
 from strata.core.errors import InvalidCoordinateError
@@ -38,7 +39,7 @@ class TestActionValidator:
 
     def test_negative_x(self) -> None:
         v = ActionValidator(_make_gui())
-        with pytest.raises(InvalidCoordinateError):
+        with pytest.raises(icontract.ViolationError):
             v.validate_coordinates_in_screen(Coordinate(x=-1.0, y=100.0))
 
     def test_edge_invalid(self) -> None:

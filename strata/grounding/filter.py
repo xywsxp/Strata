@@ -15,6 +15,8 @@ from collections.abc import Sequence
 from functools import lru_cache
 from typing import Final
 
+import icontract
+
 # Built-in secret-shape regexes (word-bounded keyword forms + concrete token
 # shapes). Each pattern is intentionally narrow to minimize false positives.
 _BUILTIN_PATTERNS: Final[tuple[str, ...]] = (
@@ -63,6 +65,10 @@ def _compiled_patterns(extra: tuple[str, ...]) -> tuple[re.Pattern[str], ...]:
     return tuple(_compile(p) for p in (*_BUILTIN_PATTERNS, *extra))
 
 
+@icontract.require(
+    lambda extra_patterns: all(isinstance(p, str) for p in extra_patterns),
+    "extra_patterns must be strings",
+)
 def contains_sensitive(text: str, extra_patterns: Sequence[str] = ()) -> bool:
     """Return True if *text* matches any built-in or extra sensitive pattern.
 
@@ -74,6 +80,10 @@ def contains_sensitive(text: str, extra_patterns: Sequence[str] = ()) -> bool:
     return any(p.search(text) is not None for p in patterns)
 
 
+@icontract.require(
+    lambda extra_patterns: all(isinstance(p, str) for p in extra_patterns),
+    "extra_patterns must be strings",
+)
 def redact(text: str, extra_patterns: Sequence[str] = ()) -> str:
     """Replace every match of a sensitive pattern with ``[REDACTED]``.
 

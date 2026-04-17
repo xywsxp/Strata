@@ -12,6 +12,7 @@ import contextlib
 import json
 import sys
 import time
+from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,7 +38,7 @@ class WorkingMemory:
     def __init__(self, config: MemoryConfig) -> None:
         self._config = config
         self._vars: dict[str, object] = {}
-        self._facts: list[ContextFact] = []
+        self._facts: deque[ContextFact] = deque(maxlen=config.max_facts_in_slot)
 
     @icontract.require(lambda key: len(key.strip()) > 0, "key must be non-empty")
     def set_var(self, key: str, value: object) -> None:
@@ -49,8 +50,6 @@ class WorkingMemory:
     @icontract.require(lambda key: len(key.strip()) > 0, "key must be non-empty")
     def add_fact(self, key: str, value: str) -> None:
         self._facts.append(ContextFact(key=key, value=value, timestamp=time.time()))
-        while len(self._facts) > self._config.max_facts_in_slot:
-            self._facts.pop(0)
 
     def get_facts(self) -> Sequence[ContextFact]:
         return tuple(self._facts)
@@ -72,7 +71,7 @@ class ContextManager:
     def __init__(self, config: MemoryConfig) -> None:
         self._config = config
         self._memory = WorkingMemory(config)
-        self._window: list[dict[str, object]] = []
+        self._window: deque[dict[str, object]] = deque(maxlen=config.sliding_window_size)
 
     @property
     def memory(self) -> WorkingMemory:
@@ -81,8 +80,6 @@ class ContextManager:
     def add_entry(self, entry: Mapping[str, object]) -> None:
         """Add an action entry to the sliding window."""
         self._window.append(dict(entry))
-        while len(self._window) > self._config.sliding_window_size:
-            self._window.pop(0)
 
     @icontract.require(lambda key: len(key.strip()) > 0, "key must be non-empty")
     def add_fact(self, key: str, value: str) -> None:
@@ -116,7 +113,7 @@ class ContextManager:
         snapshot_path = str(Path(snapshot_dir) / f"ctx_{int(time.time())}.json")
         snapshot_data = json.dumps(
             {
-                "window": self._window,
+                "window": list(self._window),
                 "facts": [
                     {"key": f.key, "value": f.value, "timestamp": f.timestamp}
                     for f in self._memory.get_facts()
