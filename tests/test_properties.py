@@ -12,7 +12,8 @@ from pathlib import Path
 import hypothesis.strategies as st
 from hypothesis import given, settings
 
-from strata.core.types import TaskGraph, TaskNode
+from strata.core._validators import VALID_GLOBAL_STATES
+from strata.core.types import GlobalState, TaskGraph, TaskNode
 from strata.grounding.filter import contains_sensitive, redact
 from strata.harness.persistence import (
     Checkpoint,
@@ -133,3 +134,29 @@ def test_prop_state_machine_only_valid_transitions(events: list[str]) -> None:
             sm.transition(event)  # type: ignore[arg-type]
     # After any sequence of events, state must be a valid GlobalState
     assert sm.state in VALID_GLOBAL_TRANSITIONS
+
+
+# ── Validators: GlobalState ↔ frozenset sync ──
+
+
+def test_prop_valid_global_states_synced_with_literal() -> None:
+    """VALID_GLOBAL_STATES must exactly equal the Literal args of GlobalState."""
+    from typing import get_args
+
+    assert frozenset(get_args(GlobalState)) == VALID_GLOBAL_STATES
+
+
+def test_global_states_contains_all_literal_values() -> None:
+    """Exhaustive check: every GlobalState value is in VALID_GLOBAL_STATES."""
+    expected = {
+        "INIT",
+        "PLANNING",
+        "CONFIRMING",
+        "SCHEDULING",
+        "EXECUTING",
+        "RECOVERING",
+        "WAITING_USER",
+        "COMPLETED",
+        "FAILED",
+    }
+    assert expected == VALID_GLOBAL_STATES

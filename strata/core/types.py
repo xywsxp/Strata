@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Literal, cast
+from typing import Literal, cast, get_args
 
-from strata.core._validators import VALID_TASK_TYPES, validate_literal
+from strata.core._validators import VALID_GLOBAL_STATES, VALID_TASK_TYPES, validate_literal
 from strata.core.errors import SerializationError
 
 # ── Type aliases ──
@@ -26,6 +26,11 @@ GlobalState = Literal[
     "COMPLETED",
     "FAILED",
 ]
+
+assert frozenset(get_args(GlobalState)) == VALID_GLOBAL_STATES, (
+    f"invariant: VALID_GLOBAL_STATES desync — "
+    f"frozenset={VALID_GLOBAL_STATES}, Literal args={set(get_args(GlobalState))}"
+)
 
 TaskState = Literal["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "SKIPPED"]
 

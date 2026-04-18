@@ -23,7 +23,17 @@ VALID_TASK_STATES: Final[frozenset[str]] = frozenset(
 )
 
 VALID_GLOBAL_STATES: Final[frozenset[str]] = frozenset(
-    {"INIT", "PLANNING", "EXECUTING", "RECOVERING", "COMPLETED", "FAILED", "ABORTED"}
+    {
+        "INIT",
+        "PLANNING",
+        "CONFIRMING",
+        "SCHEDULING",
+        "EXECUTING",
+        "RECOVERING",
+        "WAITING_USER",
+        "COMPLETED",
+        "FAILED",
+    }
 )
 
 VALID_AUTO_CONFIRM: Final[frozenset[str]] = frozenset({"none", "low", "medium", "high"})
