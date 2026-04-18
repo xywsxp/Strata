@@ -670,25 +670,21 @@ class TestContextManagerWiring:
         assert any(entry.get("task_id") == "t1" for entry in window)
         assert any(entry.get("success") is True for entry in window)
 
-    def test_failure_context_passed_to_adjuster(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Verify adjust_plan receives a failure_context that includes
-        recent_actions from the ContextManager window (E.4)."""
+    def test_splice_replan_uses_replacement_tasks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify _splice_replan uses replacement_tasks from RecoveryAction
+        to build an Adjustment, eliminating the double LLM call."""
         graph = _single_task_graph()
         _stub_decompose_goal(monkeypatch, graph)
 
-        captured: list[Mapping[str, object]] = []
+        from strata.planner.adjuster import apply_adjustment as _orig_apply
 
-        def _fake_adjust_plan(
-            graph: TaskGraph,
-            failed_task_id: str,
-            failure_context: Mapping[str, object],
-            router: object,
-            action_catalog: str | None = None,
-        ) -> object:
-            captured.append(failure_context)
-            raise PlannerError("stop")
+        captured_adjustments: list[object] = []
 
-        monkeypatch.setattr("strata.harness.orchestrator.adjust_plan", _fake_adjust_plan)
+        def _fake_apply(graph: TaskGraph, adjustment: object) -> TaskGraph:
+            captured_adjustments.append(adjustment)
+            return _orig_apply(graph, adjustment)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("strata.harness.orchestrator.apply_adjustment", _fake_apply)
 
         from strata.harness.recovery import RecoveryAction, RecoveryLevel
 
@@ -699,20 +695,19 @@ class TestContextManagerWiring:
             lambda task, error, count: RecoveryAction(
                 level=RecoveryLevel.REPLAN,
                 description="replan",
-                replacement_task=TaskNode(
-                    id="fallback",
-                    task_type="primitive",
-                    action="list_directory",
-                    params={"path": "/"},
+                replacement_tasks=(
+                    TaskNode(
+                        id="fallback",
+                        task_type="primitive",
+                        action="list_directory",
+                        params={"path": "/"},
+                    ),
                 ),
             ),
         )
         orch.run_goal("list files")
 
-        # _splice_replan calls adjust_plan internally — at least one call
-        # must carry recent_actions and facts.
-        assert captured, "adjust_plan never invoked"
-        assert any("recent_actions" in c for c in captured)
+        assert captured_adjustments, "apply_adjustment never invoked"
 
 
 class TestUIInteractions:

@@ -20,7 +20,7 @@ from __future__ import annotations
 import contextlib
 import os
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
@@ -468,7 +468,8 @@ class AgentOrchestrator:
                 idx += 1
                 continue
             if decision.outcome == "replan":
-                # tasks list already spliced in place; retry the current index.
+                if decision.new_idx is not None:
+                    idx = decision.new_idx
                 self._task_states = dict(task_states)
                 self._save_checkpoint()
                 continue
@@ -491,7 +492,7 @@ class AgentOrchestrator:
         """Execute *task*. Control-flow nodes are delegated to LinearRunner."""
         if task.task_type in ("repeat", "if_then", "for_each"):
             # Reuse LinearRunner's interpreter for loop/branch nodes.
-            return self._runner._execute_task(task, self._executor, dict(context))
+            return self._runner.execute_single(task, self._executor, dict(context))
         return self._executor.execute(task, context)
 
     def _apply_recovery(
@@ -515,14 +516,20 @@ class AgentOrchestrator:
             return _RecoveryDecision(outcome="retry")
 
         if level is RecoveryLevel.REPLAN:
-            if recovery.replacement_task is None:
+            if not recovery.replacement_tasks:
                 # RecoveryPipeline promised REPLAN but produced no node —
                 # collapse to SKIP defensively.
                 self._fire("recovered")
                 return _RecoveryDecision(outcome="skip")
-            self._splice_replan(tasks=tasks, idx=idx, task=task, task_states=task_states)
+            new_idx = self._splice_replan(
+                tasks=tasks,
+                idx=idx,
+                task=task,
+                task_states=task_states,
+                replacement_tasks=recovery.replacement_tasks,
+            )
             self._fire("recovered")
-            return _RecoveryDecision(outcome="replan")
+            return _RecoveryDecision(outcome="replan", new_idx=new_idx)
 
         if level is RecoveryLevel.SKIP:
             self._fire("recovered")
@@ -552,56 +559,38 @@ class AgentOrchestrator:
         idx: int,
         task: TaskNode,
         task_states: dict[str, TaskState],
-    ) -> None:
-        """Apply a REPLAN adjustment to *tasks* in place.
+        replacement_tasks: Sequence[TaskNode],
+    ) -> int:
+        """Apply a REPLAN adjustment to *tasks* in place and return the new idx.
 
-        Implementation detail: the RecoveryPipeline only hands us a single
-        ``replacement_task`` (its public contract is a ``Sequence[TaskNode]``
-        reduced to the first element). We construct an :class:`Adjustment`
-        with ``strategy="replace"`` and delegate to :func:`apply_adjustment`
-        for the full validation pass; if that fails we fall back to an
-        in-place swap to keep the agent moving.
+        Uses the full ``replacement_tasks`` from :class:`RecoveryAction` to
+        build an :class:`Adjustment`; falls back to direct node substitution
+        if :func:`apply_adjustment` fails.
+
+        Returns the index of the first PENDING task (or ``len(tasks)`` if all
+        are completed).
         """
         assert self._last_graph is not None
-        replacement = [t for t in [getattr(self._recovery, "_last_replacement", None)] if t]
-        # NOTE: RecoveryPipeline only returns the first replacement — we ask
-        # the adjuster directly for the full set so the graph stays coherent.
-        failure_context: Mapping[str, object] = {
-            "attempt": self._attempt_counts.get(task.id, 0),
-            "recent_actions": list(self._context.get_window()),
-            "facts": [{"key": f.key, "value": f.value} for f in self._context.get_facts()],
-        }
+        adjustment = Adjustment(
+            original_task_id=task.id,
+            replacement_tasks=tuple(replacement_tasks),
+            strategy="replace",
+        )
         try:
-            adjustment = adjust_plan(
-                self._last_graph,
-                task.id,
-                failure_context,
-                self._llm_router,
-                action_catalog=format_action_catalog_for_llm(),
-            )
             new_graph = apply_adjustment(self._last_graph, adjustment)
-        except Exception:
-            # Fallback: use the single node the pipeline produced.
-            fallback_nodes: list[TaskNode] = []
-            if replacement:
-                fallback_nodes.extend(replacement)
-            if not fallback_nodes:
-                return
-            adjustment = Adjustment(
-                original_task_id=task.id,
-                replacement_tasks=tuple(fallback_nodes),
-                strategy="replace",
-            )
-            try:
-                new_graph = apply_adjustment(self._last_graph, adjustment)
-            except PlannerError:
-                return
+        except PlannerError:
+            return idx
 
         self._last_graph = new_graph
         tasks[:] = list(new_graph.tasks)
         del task_states[task.id]
         for node in new_graph.tasks:
             task_states.setdefault(node.id, "PENDING")
+
+        for i, t in enumerate(tasks):
+            if task_states.get(t.id) == "PENDING":
+                return i
+        return len(tasks)
 
     def _adjuster(self, failed_task: TaskNode, error: Exception) -> list[TaskNode]:
         """Adjuster closure handed to :class:`RecoveryPipeline`.
@@ -766,6 +755,7 @@ class _RecoveryDecision:
 
     outcome: Literal["retry", "advance", "replan", "skip", "abort"]
     error: StrataError | None = None
+    new_idx: int | None = None
 
 
 def _default_state_dir() -> str:

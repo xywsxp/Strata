@@ -35,7 +35,7 @@ class TestRecoveryEscalation:
         pipeline = RecoveryPipeline(get_default_config(), _mock_adjuster)
         action = pipeline.attempt_recovery(_TASK, RuntimeError("fail"), 3)
         assert action.level == RecoveryLevel.REPLAN
-        assert action.replacement_task is not None
+        assert len(action.replacement_tasks) > 0
 
     def test_fifth_attempt_user(self) -> None:
         pipeline = RecoveryPipeline(get_default_config(), _mock_adjuster)

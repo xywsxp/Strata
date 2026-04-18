@@ -57,6 +57,7 @@ class CLI:
         self._bundle = bundle
         self._interrupted = False
         self._first_plan = True
+        self._retried_tasks: dict[str, bool] = {}
 
     @property
     def interrupted(self) -> bool:
@@ -193,8 +194,8 @@ class CLI:
         if level == "high":
             self._print(f"[Error] Task {task_id} failed: {error} — auto_confirm=high, skipping")
             return "skip"
-        if level == "medium" and not getattr(self, "_retried_" + task_id, False):
-            setattr(self, "_retried_" + task_id, True)
+        if level == "medium" and not self._retried_tasks.get(task_id, False):
+            self._retried_tasks[task_id] = True
             self._print(f"[Error] Task {task_id} failed: {error} — auto-retrying once")
             return "retry"
         self._print(f"\n[Error] Task {task_id} failed: {error}")

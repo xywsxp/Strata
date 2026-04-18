@@ -37,13 +37,13 @@ class LinearRunner:
         context: dict[str, object] = {}
         results: dict[str, ActionResult] = {}
         for task in graph.tasks:
-            result = self._execute_task(task, executor, context)
+            result = self.execute_single(task, executor, context)
             results[task.id] = result
             if task.output_var and result.data:
                 context[task.output_var] = result.data
         return results
 
-    def _execute_task(
+    def execute_single(
         self,
         node: TaskNode,
         executor: TaskExecutor,

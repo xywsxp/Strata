@@ -29,7 +29,7 @@ class RecoveryLevel(enum.IntEnum):
 class RecoveryAction:
     level: RecoveryLevel
     description: str
-    replacement_task: TaskNode | None = None
+    replacement_tasks: Sequence[TaskNode] = ()
 
 
 class RecoveryPipeline:
@@ -95,5 +95,5 @@ class RecoveryPipeline:
         return RecoveryAction(
             level=RecoveryLevel.REPLAN,
             description=f"replan {failed_task.id} with {len(replacements)} replacements",
-            replacement_task=replacements[0],
+            replacement_tasks=tuple(replacements),
         )
