@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Strata Debug Panel</title>
+<script src="https://unpkg.com/vis-network@9.1.6/standalone/umd/vis-network.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#0f1117;--card:#181b24;--border:#2a2d38;--accent:#6c8aff;
+--green:#4ade80;--red:#f87171;--yellow:#facc15;--text:#e2e8f0;--muted:#94a3b8;
+--font:'Inter',-apple-system,BlinkMacSystemFont,sans-serif}
+body{font-family:var(--font);background:var(--bg);color:var(--text);
+display:grid;grid-template-columns:320px 1fr 360px;grid-template-rows:56px 1fr 48px;
+height:100vh;overflow:hidden}
+header{grid-column:1/-1;display:flex;align-items:center;gap:16px;
+padding:0 20px;background:var(--card);border-bottom:1px solid var(--border)}
+header h1{font-size:16px;font-weight:600;letter-spacing:.5px}
+header .badge{padding:2px 10px;border-radius:12px;font-size:12px;font-weight:500}
+.badge-ok{background:rgba(74,222,128,.15);color:var(--green)}
+.badge-warn{background:rgba(250,204,21,.15);color:var(--yellow)}
+.badge-err{background:rgba(248,113,113,.15);color:var(--red)}
+.badge-muted{background:rgba(148,163,184,.15);color:var(--muted)}
+aside.left{grid-row:2;overflow-y:auto;background:var(--card);
+border-right:1px solid var(--border);padding:12px}
+main{grid-row:2;position:relative;overflow:hidden}
+aside.right{grid-row:2;overflow-y:auto;background:var(--card);
+border-left:1px solid var(--border);padding:12px}
+footer{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;
+padding:0 20px;background:var(--card);border-top:1px solid var(--border);font-size:12px;color:var(--muted)}
+.section{margin-bottom:16px}
+.section-title{font-size:11px;text-transform:uppercase;letter-spacing:1px;
+color:var(--muted);margin-bottom:8px;font-weight:600}
+.kv{display:flex;justify-content:space-between;padding:4px 0;font-size:13px}
+.kv .k{color:var(--muted)}.kv .v{font-weight:500}
+.btn{padding:6px 14px;border:1px solid var(--border);border-radius:6px;
+background:transparent;color:var(--text);cursor:pointer;font-size:12px;
+transition:all .15s}
+.btn:hover{border-color:var(--accent);color:var(--accent)}
+.btn-primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn-primary:hover{opacity:.85}
+.btn-danger{border-color:var(--red);color:var(--red)}
+.btn-danger:hover{background:rgba(248,113,113,.1)}
+.btn-group{display:flex;gap:6px;flex-wrap:wrap}
+#graph{width:100%;height:100%;background:var(--bg)}
+.event-log{font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.6}
+.event-log .ev{padding:3px 8px;border-radius:4px;margin-bottom:2px;background:rgba(42,45,56,.5)}
+.event-log .ts{color:var(--muted);margin-right:8px}
+input[type=text]{background:var(--bg);border:1px solid var(--border);border-radius:6px;
+padding:6px 10px;color:var(--text);font-size:13px;width:100%}
+input[type=text]:focus{outline:none;border-color:var(--accent)}
+.task-list .task{padding:6px 8px;border-radius:6px;margin-bottom:4px;font-size:12px;
+display:flex;justify-content:space-between;align-items:center}
+.task .state{padding:1px 8px;border-radius:10px;font-size:10px;font-weight:600}
+.state-PENDING{background:rgba(148,163,184,.15);color:var(--muted)}
+.state-RUNNING{background:rgba(108,138,255,.15);color:var(--accent)}
+.state-SUCCEEDED{background:rgba(74,222,128,.15);color:var(--green)}
+.state-FAILED{background:rgba(248,113,113,.15);color:var(--red)}
+.state-SKIPPED{background:rgba(250,204,21,.15);color:var(--yellow)}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;
+align-items:center;justify-content:center;z-index:100}
+.modal-bg.show{display:flex}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:12px;
+padding:24px;min-width:400px;max-width:600px}
+.modal h3{margin-bottom:12px;font-size:15px}
+.modal textarea{width:100%;min-height:200px;background:var(--bg);border:1px solid var(--border);
+border-radius:8px;padding:12px;color:var(--text);font-family:'JetBrains Mono',monospace;
+font-size:12px;resize:vertical}
+.modal .btn-group{margin-top:12px;justify-content:flex-end}
+.prompt-bar{position:absolute;bottom:0;left:0;right:0;padding:12px 16px;
+background:rgba(24,27,36,.95);border-top:1px solid var(--accent);display:none;
+align-items:center;gap:12px;z-index:50}
+.prompt-bar.show{display:flex}
+.prompt-bar .label{font-size:12px;color:var(--accent);font-weight:600}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>STRATA DEBUG</h1>
+  <span id="hdr-state" class="badge badge-muted">—</span>
+  <span id="hdr-debug" class="badge badge-muted">—</span>
+  <span style="flex:1"></span>
+  <span id="hdr-ws" class="badge badge-muted">WS: disconnected</span>
+</header>
+
+<aside class="left">
+  <div class="section">
+    <div class="section-title">Controls</div>
+    <div class="btn-group" style="margin-bottom:8px">
+      <button class="btn btn-primary" onclick="api('/api/step','POST')">Step Mode</button>
+      <button class="btn" onclick="api('/api/continue','POST')">Continue</button>
+    </div>
+    <div class="btn-group">
+      <button class="btn" onclick="refreshState()">Refresh</button>
+      <button class="btn" onclick="refreshGraph()">Reload Graph</button>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Breakpoints</div>
+    <div style="display:flex;gap:6px;margin-bottom:8px">
+      <input type="text" id="bp-input" placeholder="task_id">
+      <button class="btn" onclick="addBp()">+</button>
+    </div>
+    <div id="bp-list" style="font-size:12px"></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Rollback</div>
+    <div class="btn-group" style="margin-bottom:6px">
+      <button class="btn btn-danger" onclick="api('/api/rollback/task','POST',{n:1})">Undo Task</button>
+      <button class="btn btn-danger" onclick="showRollbackModal()">Checkpoint…</button>
+    </div>
+    <button class="btn btn-danger" style="margin-top:4px" onclick="api('/api/rollback/graph','POST',{steps:1})">Revert Graph</button>
+  </div>
+
+  <div class="section">
+    <div class="section-title">State</div>
+    <div id="state-kv"></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Tasks</div>
+    <div id="task-list" class="task-list"></div>
+  </div>
+</aside>
+
+<main>
+  <div id="graph"></div>
+  <div id="prompt-bar" class="prompt-bar">
+    <span class="label">PROMPT PENDING</span>
+    <button class="btn btn-primary" onclick="showPromptModal()">Edit & Approve</button>
+    <button class="btn" onclick="api('/api/prompt/approve','POST')">Approve</button>
+    <button class="btn btn-danger" onclick="api('/api/prompt/skip','POST')">Skip All</button>
+  </div>
+</main>
+
+<aside class="right">
+  <div class="section">
+    <div class="section-title">Event Log</div>
+    <div id="event-log" class="event-log"></div>
+  </div>
+</aside>
+
+<footer>
+  <span>Strata Debug Panel v0.1</span>
+  <span id="footer-info"></span>
+</footer>
+
+<!-- Prompt edit modal -->
+<div id="prompt-modal" class="modal-bg">
+  <div class="modal">
+    <h3>Edit Prompt</h3>
+    <div id="prompt-role" style="font-size:12px;color:var(--muted);margin-bottom:8px"></div>
+    <textarea id="prompt-editor"></textarea>
+    <div class="btn-group">
+      <button class="btn" onclick="closePromptModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="approvePrompt()">Approve</button>
+    </div>
+  </div>
+</div>
+
+<!-- Checkpoint rollback modal -->
+<div id="rollback-modal" class="modal-bg">
+  <div class="modal">
+    <h3>Rollback to Checkpoint</h3>
+    <div id="version-list" style="margin-bottom:12px;font-size:13px"></div>
+    <div style="display:flex;gap:6px;align-items:center">
+      <input type="text" id="version-input" placeholder="version number" style="width:120px">
+      <button class="btn btn-danger" onclick="rollbackToVersion()">Rollback</button>
+    </div>
+    <div class="btn-group" style="margin-top:8px">
+      <button class="btn" onclick="closeRollbackModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const TOKEN=new URLSearchParams(location.search).get('token')||'';
+const BASE=location.origin;
+const H={'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'};
+
+async function api(path,method='GET',body=null){
+  const opts={method,headers:H};
+  if(body)opts.body=JSON.stringify(body);
+  try{const r=await fetch(BASE+path,opts);return await r.json();}
+  catch(e){console.error(path,e);return null;}
+}
+
+let network=null;
+function renderGraph(graphData,taskStates){
+  if(!graphData||!graphData.tasks)return;
+  const colors={PENDING:'#94a3b8',RUNNING:'#6c8aff',SUCCEEDED:'#4ade80',FAILED:'#f87171',SKIPPED:'#facc15'};
+  const nodes=graphData.tasks.map(t=>({
+    id:t.id,label:t.id+'\n'+t.task_type+(t.action?'\n'+t.action:''),
+    color:{background:colors[taskStates[t.id]||'PENDING']||'#94a3b8',border:'#2a2d38',
+    highlight:{background:colors[taskStates[t.id]||'PENDING']||'#94a3b8'}},
+    font:{color:'#e2e8f0',size:11},shape:'box',borderWidth:1
+  }));
+  const edges=[];
+  graphData.tasks.forEach(t=>{
+    (t.depends_on||[]).forEach(d=>{edges.push({from:d,to:t.id,arrows:'to',color:{color:'#4a4d5a'}});});
+  });
+  const container=document.getElementById('graph');
+  if(network){network.setData({nodes,edges});}
+  else{network=new vis.Network(container,{nodes,edges},{
+    layout:{hierarchical:{direction:'LR',sortMethod:'directed',levelSeparation:180}},
+    physics:false,interaction:{zoomView:true,dragView:true}
+  });}
+}
+
+function renderState(d){
+  const el=document.getElementById('state-kv');
+  const badge=c=>`<span class="badge ${c==='OBSERVING'?'badge-ok':c==='PAUSED'?'badge-warn':c==='INACTIVE'?'badge-muted':'badge-err'}">${c}</span>`;
+  el.innerHTML=`
+    <div class="kv"><span class="k">Debug</span><span class="v">${badge(d.debug_state)}</span></div>
+    <div class="kv"><span class="k">Global</span><span class="v">${d.global_state||'—'}</span></div>
+    <div class="kv"><span class="k">Step Mode</span><span class="v">${d.step_mode?'ON':'OFF'}</span></div>
+  `;
+  document.getElementById('hdr-state').textContent=d.global_state||'—';
+  document.getElementById('hdr-state').className='badge '+(d.global_state==='COMPLETED'?'badge-ok':d.global_state==='FAILED'?'badge-err':'badge-muted');
+  document.getElementById('hdr-debug').textContent=d.debug_state;
+  document.getElementById('hdr-debug').className='badge '+(d.debug_state==='OBSERVING'?'badge-ok':d.debug_state==='PAUSED'?'badge-warn':'badge-muted');
+  const bps=d.breakpoints||[];
+  document.getElementById('bp-list').innerHTML=bps.map(b=>`<div style="display:flex;justify-content:space-between;padding:2px 0"><span>${b}</span><button class="btn" style="padding:1px 8px;font-size:10px" onclick="removeBp('${b}')">×</button></div>`).join('');
+}
+
+function renderTasks(ts){
+  const el=document.getElementById('task-list');
+  const entries=Object.entries(ts||{});
+  if(!entries.length){el.innerHTML='<div style="color:var(--muted);font-size:12px">No tasks</div>';return;}
+  el.innerHTML=entries.map(([id,st])=>`<div class="task"><span>${id}</span><span class="state state-${st}">${st}</span></div>`).join('');
+}
+
+async function refreshState(){
+  const d=await api('/api/state');
+  if(d){renderState(d);renderTasks(d.task_states);}
+}
+async function refreshGraph(){
+  const d=await api('/api/graph');
+  if(d&&d.graph){renderGraph(d.graph,d.task_states||{});}
+}
+async function addBp(){
+  const inp=document.getElementById('bp-input');
+  if(!inp.value.trim())return;
+  await api('/api/breakpoint','POST',{task_id:inp.value.trim(),action:'add'});
+  inp.value='';refreshState();
+}
+async function removeBp(id){
+  await api('/api/breakpoint','POST',{task_id:id,action:'remove'});
+  refreshState();
+}
+
+/* Prompt modal */
+async function showPromptModal(){
+  const d=await api('/api/prompt/pending');
+  if(!d||!d.pending){alert('No pending prompt');return;}
+  document.getElementById('prompt-role').textContent='Role: '+d.pending.role;
+  const msgs=d.pending.messages||[];
+  document.getElementById('prompt-editor').value=msgs.map(m=>m.role+':\n'+m.content).join('\n---\n');
+  document.getElementById('prompt-modal').classList.add('show');
+}
+function closePromptModal(){document.getElementById('prompt-modal').classList.remove('show');}
+async function approvePrompt(){
+  await api('/api/prompt/approve','POST');
+  closePromptModal();
+}
+
+/* Rollback modal */
+async function showRollbackModal(){
+  const d=await api('/api/rollback/versions');
+  if(!d){return;}
+  const el=document.getElementById('version-list');
+  el.innerHTML=`<div>Available: ${(d.versions||[]).join(', ')||'none'}</div><div>Undo depth: ${d.undo_depth||0}</div>`;
+  document.getElementById('rollback-modal').classList.add('show');
+}
+function closeRollbackModal(){document.getElementById('rollback-modal').classList.remove('show');}
+async function rollbackToVersion(){
+  const v=parseInt(document.getElementById('version-input').value);
+  if(isNaN(v)){alert('Enter a version number');return;}
+  await api('/api/rollback/checkpoint','POST',{version:v});
+  closeRollbackModal();refreshState();refreshGraph();
+}
+
+/* WebSocket */
+let ws=null;
+function connectWS(){
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  ws=new WebSocket(proto+'//'+location.host+'/ws/events?token='+TOKEN);
+  ws.onopen=()=>{document.getElementById('hdr-ws').textContent='WS: connected';
+    document.getElementById('hdr-ws').className='badge badge-ok';};
+  ws.onclose=()=>{document.getElementById('hdr-ws').textContent='WS: disconnected';
+    document.getElementById('hdr-ws').className='badge badge-err';
+    setTimeout(connectWS,2000);};
+  ws.onmessage=(ev)=>{
+    try{
+      const d=JSON.parse(ev.data);
+      appendEvent(d);
+      if(d.event==='prompt_pending'){
+        document.getElementById('prompt-bar').classList.add('show');
+      }else{
+        document.getElementById('prompt-bar').classList.remove('show');
+      }
+      refreshState();refreshGraph();
+    }catch(e){}
+  };
+}
+
+const MAX_LOG=200;
+function appendEvent(d){
+  const log=document.getElementById('event-log');
+  const ts=new Date(d.timestamp*1000).toLocaleTimeString();
+  const div=document.createElement('div');div.className='ev';
+  div.innerHTML=`<span class="ts">${ts}</span><strong>${d.event}</strong> → ${d.global_state}`;
+  log.prepend(div);
+  while(log.children.length>MAX_LOG)log.removeChild(log.lastChild);
+}
+
+refreshState();refreshGraph();connectWS();
+setInterval(refreshState,5000);
+</script>
+</body>
+</html>
