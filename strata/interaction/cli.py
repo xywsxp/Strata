@@ -84,7 +84,7 @@ class CLI:
             while not self._interrupted:
                 try:
                     goal = input("\n[Goal] > ").strip()
-                except EOFError:
+                except (EOFError, KeyboardInterrupt):
                     break
                 if not goal or goal.lower() in ("quit", "exit", "q"):
                     break
