@@ -159,6 +159,50 @@ class TestHTTPEndpoints:
 
         asyncio.run(_check())
 
+    def test_step_once_http_endpoint(self, _server_ctx: _ServerCtx) -> None:
+        port, token, _ctrl, _ = _server_ctx
+
+        async def _check() -> None:
+            hdrs = {"Authorization": f"Bearer {token}"}
+            async with (
+                aiohttp.ClientSession() as s,
+                s.post(
+                    f"http://127.0.0.1:{port}/api/step",
+                    headers=hdrs,
+                    json={"action": "once"},
+                ) as resp,
+            ):
+                assert resp.status == 200
+                data = await resp.json()
+                assert data["ok"] is True
+
+        asyncio.run(_check())
+
+    def test_step_toggle_still_works(self, _server_ctx: _ServerCtx) -> None:
+        port, token, _ctrl, _ = _server_ctx
+
+        async def _check() -> None:
+            hdrs = {"Authorization": f"Bearer {token}"}
+            async with aiohttp.ClientSession() as s:
+                # Enable
+                async with s.post(
+                    f"http://127.0.0.1:{port}/api/step",
+                    headers=hdrs,
+                    json={"enabled": True},
+                ) as resp:
+                    data = await resp.json()
+                    assert data["step_mode"] is True
+                # Disable
+                async with s.post(
+                    f"http://127.0.0.1:{port}/api/step",
+                    headers=hdrs,
+                    json={"enabled": False},
+                ) as resp:
+                    data = await resp.json()
+                    assert data["step_mode"] is False
+
+        asyncio.run(_check())
+
     def test_breakpoint_add_remove(self, _server_ctx: _ServerCtx) -> None:
         port, token, _ctrl, _ = _server_ctx
 
@@ -215,6 +259,89 @@ class TestHTTPEndpoints:
                 assert msg["event"] == "task_dispatched"
 
         asyncio.run(_check())
+
+
+class TestGraphHistory:
+    @pytest.fixture()
+    def _server_with_history(self) -> Generator[_ServerCtx]:
+        from strata.core.types import TaskGraph, TaskNode
+
+        port = 18397
+        cfg = _make_cfg(port)
+        ctrl = DebugController(cfg)
+        graph1 = TaskGraph(goal="g", tasks=(TaskNode(id="t1", task_type="primitive"),))
+        graph2 = TaskGraph(
+            goal="g",
+            tasks=(
+                TaskNode(id="t1", task_type="primitive"),
+                TaskNode(id="t2", task_type="primitive"),
+            ),
+        )
+        history: list[tuple[TaskGraph, str, float]] = [
+            (graph1, "initial_plan", 1713400000.0),
+            (graph2, "replan", 1713400060.0),
+        ]
+        server = DebugServer(
+            ctrl,
+            cfg,
+            graph_fn=lambda: graph2,
+            task_states_fn=lambda: {"t1": "SUCCEEDED", "t2": "PENDING"},
+            graph_history_fn=lambda: history,
+        )
+        server.start()
+        yield port, cfg.token, ctrl, server
+        server.stop()
+
+    def test_graph_history_returns_versions(self, _server_with_history: _ServerCtx) -> None:
+        port, token, _, _ = _server_with_history
+
+        async def _check() -> None:
+            async with (
+                aiohttp.ClientSession() as s,
+                s.get(
+                    f"http://127.0.0.1:{port}/api/graph/history",
+                    headers={"Authorization": f"Bearer {token}"},
+                ) as resp,
+            ):
+                assert resp.status == 200
+                data = await resp.json()
+                assert data["current_version"] == 2
+                assert len(data["versions"]) == 2
+                assert data["versions"][0]["reason"] == "initial_plan"
+                assert data["versions"][0]["task_ids"] == ["t1"]
+                assert data["versions"][1]["task_ids"] == ["t1", "t2"]
+
+        asyncio.run(_check())
+
+    def test_graph_history_empty_when_no_fn(self) -> None:
+        port = 18398
+        cfg = _make_cfg(port)
+        ctrl = DebugController(cfg)
+        graph = _make_graph()
+        server = DebugServer(
+            ctrl,
+            cfg,
+            graph_fn=lambda: graph,
+            task_states_fn=lambda: {"t1": "PENDING"},
+        )
+        server.start()
+        try:
+
+            async def _check() -> None:
+                async with (
+                    aiohttp.ClientSession() as s,
+                    s.get(
+                        f"http://127.0.0.1:{port}/api/graph/history",
+                        headers={"Authorization": f"Bearer {cfg.token}"},
+                    ) as resp,
+                ):
+                    assert resp.status == 200
+                    data = await resp.json()
+                    assert data["versions"] == []
+
+            asyncio.run(_check())
+        finally:
+            server.stop()
 
 
 class TestPanelHTML:

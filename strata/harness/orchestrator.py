@@ -246,6 +246,7 @@ class AgentOrchestrator:
                 goal_fn=self._run_goal_background,
                 cancel_fn=self.request_cancel,
                 restore_fn=self.restore_from_checkpoint,
+                graph_history_fn=lambda: self._graph_tracker.history(),
             )
             self._debug_server.start()
         else:

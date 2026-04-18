@@ -250,6 +250,7 @@ textarea{resize:vertical;min-height:68px;line-height:1.5}
   <div class="logo">STRATA <span>Debug</span></div>
   <span id="hdr-state" class="badge badge-idle">INIT</span>
   <span id="hdr-debug" class="badge badge-idle">—</span>
+  <span id="hdr-intercept" class="badge badge-idle" style="cursor:pointer" onclick="toggleIntercept()">—</span>
   <span class="spacer"></span>
   <span id="hdr-ws" class="badge badge-err">WS off</span>
 </header>
@@ -270,7 +271,7 @@ textarea{resize:vertical;min-height:68px;line-height:1.5}
         <button class="btn btn-primary" id="btn-run" onclick="submitGoal()">▶ Run Goal</button>
         <button class="btn btn-danger btn-sm" id="btn-kill" onclick="killGoal()" style="display:none">Kill</button>
         <button class="btn" onclick="api('/api/continue','POST')">Continue</button>
-        <button class="btn" onclick="api('/api/step','POST')">Step</button>
+        <button class="btn" onclick="api('/api/step','POST',{action:'once'})">Step</button>
       </div>
       <label style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:4px;margin-top:4px">
         <input type="checkbox" id="step-mode-check" onchange="applyStepMode()">
@@ -309,7 +310,7 @@ textarea{resize:vertical;min-height:68px;line-height:1.5}
     </div>
     <div class="btn-group">
       <button class="btn btn-sm" id="btn-undo" onclick="undoLastTask()">Undo Task <span id="undo-depth"></span></button>
-      <button class="btn btn-sm" onclick="api('/api/rollback/graph','POST',{steps:1}).then(()=>{refreshState();refreshGraph()})">Revert Graph</button>
+      <button class="btn btn-sm" onclick="showGraphRollbackModal()">Graph…</button>
     </div>
   </div>
 
@@ -357,7 +358,7 @@ textarea{resize:vertical;min-height:68px;line-height:1.5}
   <div id="paused-bar" class="paused-bar">
     PAUSED — waiting for Continue or Step
     <button class="btn btn-sm btn-primary" onclick="api('/api/continue','POST')">Continue</button>
-    <button class="btn btn-sm" onclick="api('/api/step','POST')">Step</button>
+    <button class="btn btn-sm" onclick="api('/api/step','POST',{action:'once'})">Step</button>
   </div>
   <!-- LLM Calls panel — always-on log + intercept approval banner -->
   <div id="prompt-panel" class="center-panel">
@@ -391,6 +392,15 @@ textarea{resize:vertical;min-height:68px;line-height:1.5}
       <button class="btn btn-sm" onclick="refreshGraph()">↻ Graph</button>
     </div>
     <div id="task-state-list"></div>
+  </div>
+
+  <!-- Task Detail (hidden by default, shown on node click) -->
+  <div id="task-detail" class="section" style="display:none;max-height:240px;overflow-y:auto;flex-shrink:0;border-top:1px solid var(--border);padding-top:8px">
+    <div class="section-hdr">
+      <span>Task Detail</span>
+      <button class="btn btn-sm" onclick="hideTaskDetail()">✕</button>
+    </div>
+    <div id="task-detail-body" style="font-size:12px"></div>
   </div>
 
   <div class="section" style="max-height:200px;overflow-y:auto;flex-shrink:0">
@@ -438,6 +448,19 @@ textarea{resize:vertical;min-height:68px;line-height:1.5}
   </div>
 </div>
 
+<!-- ─── Graph rollback modal ─── -->
+<div id="graph-rollback-modal" class="modal-bg">
+  <div class="modal" style="min-width:500px">
+    <h3>⏪ Graph Version Rollback</h3>
+    <div id="graph-version-list" style="margin-bottom:10px;font-size:12px;max-height:200px;overflow-y:auto"></div>
+    <div id="graph-diff" style="margin-bottom:10px;font-size:12px;max-height:140px;overflow-y:auto;display:none"></div>
+    <div class="footer">
+      <button class="btn" onclick="closeGraphRollbackModal()">Cancel</button>
+      <button class="btn btn-danger" id="btn-graph-rollback" disabled onclick="executeGraphRollback()">Rollback</button>
+    </div>
+  </div>
+</div>
+
 
 
 <script>
@@ -465,6 +488,8 @@ async function api(path, method = 'GET', body = null) {
 
 // ─── Graph ───
 let network = null;
+let _cachedGraphData = null;
+let _cachedTaskStates = {};
 const COLORS = {
   PENDING:   { bg:'#f1f5f9', border:'#94a3b8', font:'#475569' },
   RUNNING:   { bg:'#dbeafe', border:'#3b82f6', font:'#1e40af' },
@@ -475,6 +500,8 @@ const COLORS = {
 
 function renderGraph(graphData, taskStates) {
   if (!graphData || !graphData.tasks) return;
+  _cachedGraphData = graphData;
+  _cachedTaskStates = taskStates || {};
   const nodes = graphData.tasks.map(t => {
     const c = COLORS[taskStates[t.id] || 'PENDING'] || COLORS.PENDING;
     return {
@@ -500,6 +527,10 @@ function renderGraph(graphData, taskStates) {
       physics: false,
       interaction: { zoomView: true, dragView: true },
     });
+    network.on('click', params => {
+      if (params.nodes && params.nodes.length) showTaskDetail(params.nodes[0]);
+      else hideTaskDetail();
+    });
   }
 }
 
@@ -515,6 +546,20 @@ function renderState(d) {
   hds.textContent = ds;
   hds.className = 'badge ' + (ds === 'OBSERVING' ? 'badge-ok' : ds === 'PAUSED' ? 'badge-warn' : ds === 'EDITING_PROMPT' ? 'badge-blue' : 'badge-idle');
   document.getElementById('paused-bar').classList.toggle('show', ds === 'PAUSED');
+
+  // intercept badge
+  if (d.intercept_prompts !== undefined) {
+    _lastInterceptState = d.intercept_prompts;
+    const hi = document.getElementById('hdr-intercept');
+    if (d.intercept_prompts) {
+      hi.textContent = 'Intercept ON';
+      hi.className = 'badge badge-blue';
+    } else {
+      hi.textContent = 'Intercept OFF';
+      hi.className = 'badge badge-idle';
+    }
+  }
+
   const promptTab = document.getElementById('prompt-tab');
   if (ds === 'EDITING_PROMPT' && !_justApproved) {
     if (promptTab) promptTab.classList.add('tab-alert');
@@ -543,7 +588,7 @@ function renderState(d) {
     tl.innerHTML = planningMsg;
   } else {
     tl.innerHTML = entries.map(([id, st]) =>
-      `<div class="task-state-item">
+      `<div class="task-state-item" style="cursor:pointer" onclick="showTaskDetail('${escapeHtml(id)}')">
         <span style="font-size:12px;font-weight:500">${id}</span>
         <span class="ts-badge ts-${st}">${st}</span>
       </div>`
@@ -572,6 +617,31 @@ async function refreshGraph() {
   if (d && d.graph) renderGraph(d.graph, d.task_states || {});
 }
 
+// ─── Task Detail ───
+function showTaskDetail(taskId) {
+  if (!_cachedGraphData || !_cachedGraphData.tasks) return;
+  const task = _cachedGraphData.tasks.find(t => t.id === taskId);
+  if (!task) return;
+  const state = _cachedTaskStates[taskId] || 'PENDING';
+  const el = document.getElementById('task-detail-body');
+  const params = task.params ? JSON.stringify(task.params, null, 2) : '{}';
+  el.innerHTML = `
+    <div class="kv"><span class="k">ID</span><span class="v" style="color:var(--accent)">${escapeHtml(task.id)}</span></div>
+    <div class="kv"><span class="k">Type</span><span class="v">${escapeHtml(task.task_type || '')}</span></div>
+    <div class="kv"><span class="k">Action</span><span class="v">${escapeHtml(task.action || '—')}</span></div>
+    <div class="kv"><span class="k">State</span><span class="v"><span class="ts-badge ts-${state}">${state}</span></span></div>
+    <div class="kv"><span class="k">Depends</span><span class="v">${(task.depends_on||[]).join(', ') || '—'}</span></div>
+    <div class="kv"><span class="k">Output</span><span class="v">${escapeHtml(task.output_var || '—')}</span></div>
+    <div style="margin-top:6px;font-size:10px;font-weight:600;color:var(--muted)">PARAMS</div>
+    <pre style="font-size:10px;background:var(--bg);padding:6px;border-radius:4px;max-height:80px;overflow-y:auto;margin-top:4px">${escapeHtml(params)}</pre>
+  `;
+  document.getElementById('task-detail').style.display = '';
+}
+
+function hideTaskDetail() {
+  document.getElementById('task-detail').style.display = 'none';
+}
+
 async function addBp() {
   const inp = document.getElementById('bp-input');
   if (!inp.value.trim()) return;
@@ -587,6 +657,17 @@ async function removeBp(id) {
 // ─── Goal submission ───
 let taskList = [];
 let selectedTask = null;
+let _lastInterceptState = false;
+
+async function toggleIntercept() {
+  if (_lastInterceptState) {
+    await api('/api/prompt/skip', 'POST');
+  } else {
+    await api('/api/prompt/enable', 'POST');
+  }
+  _lastInterceptState = !_lastInterceptState;
+  refreshState();
+}
 
 async function loadTasks() {
   const d = await api('/api/tasks');
@@ -721,6 +802,89 @@ async function rollbackToVersion() {
   closeRollbackModal();
   refreshState();
   refreshGraph();
+}
+
+// ─── Graph rollback modal ───
+let _graphHistoryData = null;
+let _selectedGraphVersion = null;
+
+async function showGraphRollbackModal() {
+  const d = await api('/api/graph/history');
+  if (!d) return;
+  _graphHistoryData = d;
+  _selectedGraphVersion = null;
+  const el = document.getElementById('graph-version-list');
+  const versions = d.versions || [];
+  if (!versions.length) {
+    el.innerHTML = '<div style="color:var(--muted)">No graph versions available</div>';
+    document.getElementById('graph-diff').style.display = 'none';
+    document.getElementById('btn-graph-rollback').disabled = true;
+    document.getElementById('graph-rollback-modal').classList.add('show');
+    return;
+  }
+  el.innerHTML = versions.map(v =>
+    `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border);cursor:pointer"
+          onclick="selectGraphVersion(${v.version})" id="gv-row-${v.version}">
+      <span style="font-weight:700;min-width:24px">v${v.version}</span>
+      <span style="color:var(--muted)">${escapeHtml(v.reason)}</span>
+      <span style="color:var(--muted);font-size:10px;margin-left:auto">${new Date(v.timestamp * 1000).toLocaleTimeString()}</span>
+    </div>`
+  ).join('');
+  document.getElementById('graph-diff').style.display = 'none';
+  document.getElementById('btn-graph-rollback').disabled = true;
+  document.getElementById('graph-rollback-modal').classList.add('show');
+}
+
+function selectGraphVersion(ver) {
+  if (!_graphHistoryData) return;
+  const current = _graphHistoryData.current_version;
+  if (ver >= current) {
+    document.getElementById('btn-graph-rollback').disabled = true;
+    return;
+  }
+  _selectedGraphVersion = ver;
+  // Highlight selected row
+  document.querySelectorAll('[id^="gv-row-"]').forEach(el => {
+    el.style.background = '';
+  });
+  const row = document.getElementById('gv-row-' + ver);
+  if (row) row.style.background = '#eff2ff';
+
+  // Compute diff
+  const targetVer = _graphHistoryData.versions.find(v => v.version === ver);
+  const currentVer = _graphHistoryData.versions[_graphHistoryData.versions.length - 1];
+  if (!targetVer || !currentVer) return;
+  const targetIds = new Set(targetVer.task_ids || []);
+  const currentIds = new Set(currentVer.task_ids || []);
+  const removed = [...currentIds].filter(id => !targetIds.has(id));
+  const added = [...targetIds].filter(id => !currentIds.has(id));
+  const unchanged = [...currentIds].filter(id => targetIds.has(id));
+  const diffEl = document.getElementById('graph-diff');
+  diffEl.style.display = '';
+  diffEl.innerHTML = `
+    <div style="font-size:10px;font-weight:700;color:var(--muted);margin-bottom:4px">DIFF: v${current} → v${ver}</div>
+    ${removed.map(id => `<span class="tag" style="background:#fee2e2;color:var(--red);margin:2px">- ${escapeHtml(id)}</span>`).join('')}
+    ${added.map(id => `<span class="tag" style="background:#dcfce7;color:var(--green);margin:2px">+ ${escapeHtml(id)}</span>`).join('')}
+    ${unchanged.map(id => `<span class="tag" style="margin:2px">${escapeHtml(id)}</span>`).join('')}
+    ${!removed.length && !added.length ? '<div style="color:var(--muted);font-size:11px;margin-top:4px">No task changes</div>' : ''}
+  `;
+  document.getElementById('btn-graph-rollback').disabled = false;
+}
+
+async function executeGraphRollback() {
+  if (_selectedGraphVersion === null || !_graphHistoryData) return;
+  const steps = _graphHistoryData.current_version - _selectedGraphVersion;
+  if (steps <= 0) return;
+  await api('/api/rollback/graph', 'POST', { steps });
+  closeGraphRollbackModal();
+  refreshState();
+  refreshGraph();
+}
+
+function closeGraphRollbackModal() {
+  document.getElementById('graph-rollback-modal').classList.remove('show');
+  _graphHistoryData = null;
+  _selectedGraphVersion = null;
 }
 
 // ─── WebSocket ───

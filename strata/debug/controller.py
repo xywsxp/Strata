@@ -141,6 +141,14 @@ class DebugController:
             self._step_mode = False
         self._proceed.set()
 
+    def step_once(self) -> None:
+        """Enable step mode and release one await_step barrier atomically."""
+        with self._lock:
+            if self._debug_state == "INACTIVE":
+                return
+            self._step_mode = True
+            self._proceed.set()
+
     def await_step(self, task_id: str) -> None:
         """Block until continue if step mode or *task_id* hits a breakpoint."""
         need_pause = False

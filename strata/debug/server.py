@@ -10,7 +10,7 @@ import asyncio
 import importlib.resources
 import json
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -72,6 +72,7 @@ class DebugServer:
         goal_fn: Callable[[str], None] | None = None,
         cancel_fn: Callable[[], None] | None = None,
         restore_fn: Callable[[Checkpoint], None] | None = None,
+        graph_history_fn: Callable[[], Sequence[tuple[object, str, float]]] | None = None,
     ) -> None:
         self._controller = controller
         self._config = config
@@ -83,6 +84,7 @@ class DebugServer:
         self._goal_fn = goal_fn
         self._cancel_fn = cancel_fn
         self._restore_fn = restore_fn
+        self._graph_history_fn = graph_history_fn
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._runner: aiohttp.web.AppRunner | None = None
@@ -163,6 +165,7 @@ class DebugServer:
         app.router.add_post("/api/goal/cancel", self._handle_goal_cancel)
         app.router.add_get("/api/llm/history", self._handle_llm_history)
         app.router.add_get("/api/llm/history/{seq}", self._handle_llm_record)
+        app.router.add_get("/api/graph/history", self._handle_graph_history)
         self._runner = aiohttp.web.AppRunner(app)
         await self._runner.setup()
         site = aiohttp.web.TCPSite(self._runner, "0.0.0.0", self._config.port)
@@ -237,12 +240,18 @@ class DebugServer:
 
     async def _handle_step(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
         enabled = True
+        action: str | None = None
         try:
             body = await request.json()
             if isinstance(body, dict):
-                enabled = bool(body.get("enabled", True))
+                action = body.get("action")
+                if action is None:
+                    enabled = bool(body.get("enabled", True))
         except Exception:
             pass
+        if action == "once":
+            self._controller.step_once()
+            return aiohttp.web.json_response({"ok": True})
         if enabled:
             self._controller.enable_step_mode()
         else:
@@ -509,3 +518,24 @@ class DebugServer:
                 "error_msg": rec.error_msg,
             }
         )
+
+    async def _handle_graph_history(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        """Return graph version history with task ID lists for diff computation."""
+        if self._graph_history_fn is None:
+            return aiohttp.web.json_response({"versions": [], "current_version": 0})
+        history = self._graph_history_fn()
+        versions: list[dict[str, object]] = []
+        for idx, (graph, reason, ts) in enumerate(history, 1):
+            task_ids: list[str] = []
+            if hasattr(graph, "tasks"):
+                task_ids = [t.id for t in graph.tasks]
+            versions.append(
+                {
+                    "version": idx,
+                    "reason": reason,
+                    "timestamp": ts,
+                    "task_ids": task_ids,
+                }
+            )
+        current_version = len(versions)
+        return aiohttp.web.json_response({"versions": versions, "current_version": current_version})

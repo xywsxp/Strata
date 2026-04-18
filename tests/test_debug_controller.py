@@ -363,3 +363,61 @@ def test_debug_state_literal_no_rolling_back() -> None:
     ctrl = DebugController(cfg)
     state: DebugState = ctrl.debug_state
     assert state in {"INACTIVE", "OBSERVING", "PAUSED", "EDITING_PROMPT"}
+
+
+# ── step_once tests (Phase 11.1) ──
+
+
+@given(st.booleans())
+def test_prop_step_once_preserves_step_mode(initial_step: bool) -> None:
+    """step_once always leaves step_mode True, regardless of prior state."""
+    cfg = DebugConfig(enabled=True, port=8390, token="t")
+    ctrl = DebugController(cfg)
+    if initial_step:
+        ctrl.enable_step_mode()
+    else:
+        ctrl.disable_step_mode()
+    ctrl.step_once()
+    snap = ctrl.get_state_snapshot()
+    assert snap["step_mode"] is True
+
+
+def test_step_once_releases_paused_barrier() -> None:
+    """step_once releases a single await_step, then next one blocks again."""
+    cfg = DebugConfig(enabled=True, port=8390, token="t")
+    ctrl = DebugController(cfg)
+    ctrl.enable_step_mode()
+
+    released = threading.Event()
+    paused = threading.Event()
+    second_paused = threading.Event()
+    second_released = threading.Event()
+
+    def worker() -> None:
+        paused.set()
+        ctrl.await_step("t1")
+        released.set()
+        second_paused.set()
+        ctrl.await_step("t2")
+        second_released.set()
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    paused.wait(timeout=2.0)
+    assert not released.wait(timeout=0.15), "should be blocked on first await_step"
+    ctrl.step_once()
+    assert released.wait(timeout=5.0), "should have been released by step_once"
+    second_paused.wait(timeout=2.0)
+    assert not second_released.wait(timeout=0.15), "should block on second await_step"
+    # Clean up
+    ctrl.continue_execution()
+    second_released.wait(timeout=2.0)
+    t.join(timeout=2.0)
+
+
+def test_step_once_inactive_is_noop() -> None:
+    """step_once on INACTIVE controller does nothing."""
+    cfg = DebugConfig(enabled=False, port=0, token="")
+    ctrl = DebugController(cfg)
+    ctrl.step_once()
+    assert ctrl.debug_state == "INACTIVE"
