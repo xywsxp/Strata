@@ -1,13 +1,16 @@
 """Terminal command handler — wraps ITerminalAdapter with sudo sanitization.
 
 The underlying PTY adapter embeds its own exit-code token, so this handler is
-deliberately thin: it only enforces the ``sudo -n`` rule via a shell-lex aware
-check on the first token. Regex-based rewriting is avoided because it ignores
-shell word boundaries (e.g. ``"sudo"`` inside a quoted string literal).
+deliberately thin: it enforces the ``sudo -n`` rule across all sub-commands in
+a pipeline or chain (``|``, ``&&``, ``||``, ``;``).
+
+Each sub-command is tokenized with ``shlex`` so that ``sudo`` appearing inside
+a quoted argument (e.g. ``echo 'sudo rm -rf /'``) is left untouched.
 """
 
 from __future__ import annotations
 
+import re
 import shlex
 
 import icontract
@@ -15,6 +18,26 @@ import icontract
 from strata.core.config import TerminalConfig
 from strata.core.types import CommandResult
 from strata.env.protocols import ITerminalAdapter
+
+_SHELL_OP = re.compile(r"(&&|\|\||[;|])")
+
+
+def _sanitize_sudo_segment(segment: str) -> str:
+    """Inject ``-n`` into a single shell command segment if it starts with ``sudo``."""
+    stripped = segment.strip()
+    if not stripped:
+        return segment
+    try:
+        tokens = shlex.split(stripped, posix=True)
+    except ValueError:
+        return segment
+    if not tokens or tokens[0] != "sudo":
+        return segment
+    if len(tokens) >= 2 and tokens[1] == "-n":
+        return segment
+    leading_ws = segment[: len(segment) - len(segment.lstrip())]
+    rest = segment.lstrip()
+    return leading_ws + "sudo -n" + rest[4:]
 
 
 class TerminalHandler:
@@ -37,18 +60,16 @@ class TerminalHandler:
         )
 
     def _sanitize_sudo(self, command: str) -> str:
-        """Ensure a leading ``sudo`` invocation always uses ``-n``.
+        """Ensure every ``sudo`` invocation in a pipeline/chain uses ``-n``.
 
-        Uses ``shlex`` tokenization so that ``sudo`` appearing inside a quoted
-        argument (e.g. ``echo 'sudo rm -rf /'``) is left untouched. Only the
-        first shell word of the command is inspected.
+        Splits on shell operators (``|``, ``&&``, ``||``, ``;``) then checks
+        each segment independently via ``shlex`` tokenization.
         """
-        try:
-            tokens = shlex.split(command, posix=True)
-        except ValueError:
-            return command
-        if not tokens or tokens[0] != "sudo":
-            return command
-        if len(tokens) >= 2 and tokens[1] == "-n":
-            return command
-        return "sudo -n " + command[len("sudo") :].lstrip()
+        parts = _SHELL_OP.split(command)
+        result: list[str] = []
+        for i, part in enumerate(parts):
+            if i % 2 == 1:
+                result.append(part)
+            else:
+                result.append(_sanitize_sudo_segment(part))
+        return "".join(result)

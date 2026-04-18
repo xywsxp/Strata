@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import io
+import json
 
 import icontract
 
@@ -22,15 +23,9 @@ from strata.core.types import ScreenRegion
 from strata.env.osworld_client import OSWorldHTTPClient
 
 
-def _pyautogui_escape(text: str) -> str:
-    """Escape a string for safe embedding in a python triple-quoted literal.
-
-    ``'''`` sequences in user text would break the quoting, so we forbid them
-    conservatively (callers can use :meth:`type_text` with chunks instead).
-    """
-    if "'''" in text:
-        raise ValueError("text may not contain triple-single-quote sequences")
-    return text
+def _json_param(value: object) -> str:
+    """Serialize *value* to a JSON string safe for embedding in Python code."""
+    return json.dumps(value, ensure_ascii=False)
 
 
 class OSWorldGUIAdapter:
@@ -83,12 +78,11 @@ class OSWorldGUIAdapter:
         # CONVENTION: pynput.keyboard.Controller.type() 替代 pyautogui.typewrite()。
         # typewrite() 只能按键名发送事件，无法正确输入需要 Shift 的字符
         # （< > { } " 等全部打错）。pynput.type() 通过 Xlib 正确处理修饰键。
-        escaped = _pyautogui_escape(text)
         self._run_python(
-            "import time\n"
+            "import json, time\n"
             "from pynput.keyboard import Controller as _Kbd\n"
             "_kbd = _Kbd()\n"
-            f"for _ch in r'''{escaped}''':\n"
+            f"for _ch in json.loads({_json_param(text)!r}):\n"
             f"    _kbd.type(_ch)\n"
             f"    time.sleep({float(interval)})\n"
         )

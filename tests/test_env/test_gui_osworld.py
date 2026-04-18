@@ -144,26 +144,24 @@ class TestKeyboardActions:
         assert "_Kbd" in code or "Controller" in code
         assert "hello world" in code
 
-    def test_type_text_uses_raw_string_literal(self) -> None:
-        """Backslashes must survive to pyautogui verbatim — the emitted
-        run_python snippet must wrap the text in a raw triple-quoted string
-        (``r'''...'''``). Regression guard for the ``\\074`` → ``<`` octal
-        interpretation bug.
-        """
+    def test_type_text_uses_json_parameterization(self) -> None:
+        """Text is passed via json.loads() — no f-string code splicing."""
         client = MagicMock()
         client.post_json.return_value = {"status": "success"}
         adapter = _make_adapter(client)
         adapter.type_text("printf '\\074br\\076'")  # type: ignore[attr-defined]
         code = client.post_json.call_args.args[1]["code"]
-        assert "r'''" in code
-        assert "\\074br\\076" in code
+        assert "json.loads(" in code
+        assert "074br" in code
 
-    def test_type_text_rejects_triple_quote(self) -> None:
+    def test_type_text_handles_triple_quote(self) -> None:
+        """Triple quotes no longer need special treatment with JSON parameterization."""
         client = MagicMock()
+        client.post_json.return_value = {"status": "success"}
         adapter = _make_adapter(client)
-        with pytest.raises(ValueError):
-            adapter.type_text("evil '''injection''' attempt")  # type: ignore[attr-defined]
-        client.post_json.assert_not_called()
+        adapter.type_text("text '''with''' triple quotes")  # type: ignore[attr-defined]
+        code = client.post_json.call_args.args[1]["code"]
+        assert "json.loads(" in code
 
     def test_press_key(self) -> None:
         client = MagicMock()
