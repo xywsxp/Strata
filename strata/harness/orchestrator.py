@@ -164,6 +164,28 @@ class AgentOrchestrator:
         self._task_states: dict[str, TaskState] = {}
         self._current_goal: str = ""
 
+        # CONVENTION: debug 组件条件构造——enabled=false 时不 import aiohttp，
+        # _debug_controller=None 使 _fire/await_step 短路为零开销。
+        if config.debug.enabled:
+            from strata.debug.controller import DebugController
+            from strata.debug.server import DebugServer
+
+            self._debug_controller: DebugController | None = DebugController(
+                config.debug,
+                interrupt_check=lambda: self._ui.interrupted,
+            )
+            self._debug_server: DebugServer | None = DebugServer(
+                controller=self._debug_controller,
+                config=config.debug,
+                gui=bundle.gui,
+                graph_fn=lambda: self._last_graph,
+                task_states_fn=lambda: dict(self._task_states),
+            )
+            self._debug_server.start()
+        else:
+            self._debug_controller = None
+            self._debug_server = None
+
     @icontract.require(
         lambda goal: len(goal.strip()) > 0,
         "goal must be non-empty",
@@ -400,6 +422,8 @@ class AgentOrchestrator:
             self._fire("task_dispatched")
             task_states[task.id] = "RUNNING"
             self._ui.display_progress(task.id, "RUNNING")
+            if self._debug_controller is not None:
+                self._debug_controller.await_step(task.id)
 
             with contextlib.suppress(Exception):
                 self._active_recorder.note_keyframe(f"{task.id}_before")
@@ -703,7 +727,9 @@ class AgentOrchestrator:
     # ── state machine helpers ──
 
     def _fire(self, event: GlobalEvent) -> None:
-        self._state_machine.transition(event)
+        new_state = self._state_machine.transition(event)
+        if self._debug_controller is not None:
+            self._debug_controller.notify(event, new_state, dict(self._task_states))
 
     def _assert_graph_actions_in_vocab(self, graph: TaskGraph) -> None:
         vocab = set(ACTION_VOCABULARY)

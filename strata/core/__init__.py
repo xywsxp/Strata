@@ -2,6 +2,7 @@
 
 from strata import StrataError
 from strata.core.config import (
+    DebugConfig,
     SandboxConfig,
     StrataConfig,
     get_default_config,
@@ -13,6 +14,9 @@ from strata.core.errors import (
     CommandTimeoutError,
     ConfigError,
     ContextError,
+    DebugError,
+    DebugRollbackError,
+    DebugServerError,
     ElementNotFoundError,
     GoalDecompositionError,
     GroundingError,
@@ -66,6 +70,10 @@ from strata.core.types import (
 
 __all__ = [
     "ActionParamsError",
+    "DebugConfig",
+    "DebugError",
+    "DebugRollbackError",
+    "DebugServerError",
     "ActionResult",
     "AdjusterNotAvailableError",
     "AppInfo",

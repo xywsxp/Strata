@@ -15,6 +15,7 @@ import hypothesis.strategies as st
 from hypothesis.strategies import SearchStrategy
 
 from strata.core._validators import VALID_GLOBAL_STATES
+from strata.core.config import DebugConfig
 from strata.core.types import ActionResult, CommandResult, Coordinate, TaskGraph, TaskNode
 from strata.harness.actions import ACTION_PARAM_SCHEMA, ACTION_VOCABULARY
 from strata.harness.persistence import Checkpoint
@@ -378,3 +379,74 @@ def st_sudo_command(draw: st.DrawFn) -> str:
 def st_valid_literal_value(valid: frozenset[str]) -> SearchStrategy[str]:
     """Draw a value from a valid frozenset of literal strings."""
     return st.sampled_from(sorted(valid))
+
+
+# ── Debug config strategy ──
+
+
+@st.composite
+def st_debug_config(draw: st.DrawFn, enabled: bool | None = None) -> DebugConfig:
+    """Generate a DebugConfig with valid field combinations.
+
+    When ``enabled`` is True, port is in 1024-65535 and token is non-empty.
+    When ``enabled`` is False, port and token can be anything.
+    """
+    is_enabled = enabled if enabled is not None else draw(st.booleans())
+    if is_enabled:
+        port = draw(st.integers(min_value=1024, max_value=65535))
+        token = draw(st.text(min_size=1, max_size=64, alphabet=_ALPHA_NUM))
+    else:
+        port = draw(st.integers(min_value=0, max_value=65535))
+        token = draw(st.text(max_size=64))
+    intercept = draw(st.booleans())
+    max_cp = draw(st.integers(min_value=1, max_value=200))
+    return DebugConfig(
+        enabled=is_enabled,
+        port=port,
+        token=token,
+        intercept_prompts=intercept,
+        max_checkpoint_history=max_cp,
+    )
+
+
+# ── Debug event / breakpoint strategies ──
+
+_GLOBAL_EVENTS = st.sampled_from(
+    [
+        "receive_goal",
+        "plan_ready",
+        "user_confirm",
+        "user_revise",
+        "task_dispatched",
+        "task_done",
+        "task_failed",
+        "recovered",
+        "escalated",
+        "user_decision",
+        "user_abort",
+        "all_done",
+        "unrecoverable",
+    ]
+)
+_GLOBAL_STATE_NAMES = st.sampled_from(sorted(VALID_GLOBAL_STATES))
+
+
+@st.composite
+def st_debug_event(draw: st.DrawFn) -> tuple[str, str, dict[str, str]]:
+    """Generate (event_name, global_state, task_states) for DebugController.notify."""
+    event = draw(_GLOBAL_EVENTS)
+    gs = draw(_GLOBAL_STATE_NAMES)
+    n = draw(st.integers(min_value=0, max_value=5))
+    ts = {
+        f"t{i}": draw(st.sampled_from(["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "SKIPPED"]))
+        for i in range(n)
+    }
+    return (event, gs, ts)
+
+
+def st_breakpoint_set(max_size: int = 10) -> SearchStrategy[frozenset[str]]:
+    """Generate a frozenset of task_id strings for breakpoint tests."""
+    return st.frozensets(
+        st.text(min_size=1, max_size=20, alphabet=_ALPHA_NUM),
+        max_size=max_size,
+    )

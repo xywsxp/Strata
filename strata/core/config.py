@@ -90,6 +90,17 @@ class OSWorldConfig:
 
 
 @dataclass(frozen=True)
+class DebugConfig:
+    """Debug UI server configuration."""
+
+    enabled: bool
+    port: int
+    token: str
+    intercept_prompts: bool = False
+    max_checkpoint_history: int = 50
+
+
+@dataclass(frozen=True)
 class StrataConfig:
     log_level: str
     audit_log: str
@@ -105,6 +116,7 @@ class StrataConfig:
     max_loop_iterations: int
     dangerous_patterns: Sequence[str] = field(default_factory=tuple)
     auto_confirm_level: Literal["none", "low", "medium", "high"] = "low"
+    debug: DebugConfig = field(default_factory=lambda: DebugConfig(enabled=False, port=0, token=""))
 
     def __repr__(self) -> str:
         providers_repr = {k: repr(v) for k, v in self.providers.items()}
@@ -230,6 +242,29 @@ def _parse_paths(raw: object) -> PathsConfig:
     )
 
 
+def _parse_debug(raw: object) -> DebugConfig:
+    section = raw if isinstance(raw, dict) else {}
+    enabled = bool(section.get("enabled", False))
+    port = int(section.get("port", 0))
+    token = str(section.get("token", ""))
+    intercept_prompts = bool(section.get("intercept_prompts", False))
+    max_checkpoint_history = int(section.get("max_checkpoint_history", 50))
+    if enabled:
+        if port < 1024 or port > 65535:
+            raise ConfigError(
+                f"debug.port must be in range 1024-65535 when debug is enabled, got {port}"
+            )
+        if not token.strip():
+            raise ConfigError("debug.token must be a non-empty string when debug is enabled")
+    return DebugConfig(
+        enabled=enabled,
+        port=port,
+        token=token,
+        intercept_prompts=intercept_prompts,
+        max_checkpoint_history=max_checkpoint_history,
+    )
+
+
 def _parse_osworld(raw: object) -> OSWorldConfig:
     section = raw if isinstance(raw, dict) else {}
     screen_raw = section.get("screen_size", [1920, 1080])
@@ -292,6 +327,7 @@ def load_config(path: str | None = None) -> StrataConfig:
     memory = _parse_memory(data.get("memory"))
     paths = _parse_paths(data.get("paths"))
     osworld = _parse_osworld(data.get("osworld"))
+    debug = _parse_debug(data.get("debug"))
 
     dangerous_raw = data.get("dangerous_patterns", ())
     dangerous: tuple[str, ...]
@@ -323,6 +359,7 @@ def load_config(path: str | None = None) -> StrataConfig:
                 config_error=True,
             ),
         ),
+        debug=debug,
     )
 
 
@@ -388,4 +425,5 @@ def get_default_config() -> StrataConfig:
         max_loop_iterations=50,
         dangerous_patterns=("rm -rf", "mkfs", "dd if=", "> /dev/", "chmod 777"),
         auto_confirm_level="low",
+        debug=DebugConfig(enabled=False, port=0, token=""),
     )

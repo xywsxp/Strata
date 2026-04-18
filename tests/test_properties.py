@@ -1,9 +1,10 @@
-"""Hypothesis property tests — Phase 6.
+"""Hypothesis property tests — Phase 6 + Phase 7.
 
 6.3: Checkpoint roundtrip
 6.4: redact idempotency
 6.5: State machine transition legality
 6.6: New property tests (task roundtrip, scaler, sudo, cycle detection, etc.)
+7.1: DebugConfig property tests
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import hypothesis.strategies as st
 from hypothesis import given, settings
 
 from strata.core._validators import VALID_GLOBAL_STATES
+from strata.core.config import DebugConfig
 from strata.core.types import GlobalState, TaskGraph, TaskNode
 from strata.grounding.filter import contains_sensitive, redact
 from strata.harness.persistence import (
@@ -28,6 +30,7 @@ from strata.harness.state_machine import (
 )
 from tests.strategies import (
     st_checkpoint,
+    st_debug_config,
     st_sudo_command,
     st_task_graph_strategy,
     st_task_node_strategy,
@@ -284,3 +287,78 @@ def test_prop_sanitize_sudo_idempotent(cmd: str) -> None:
     once = handler._sanitize_sudo(cmd)
     twice = handler._sanitize_sudo(once)
     assert once == twice, f"not idempotent: {cmd!r} -> {once!r} -> {twice!r}"
+
+
+# ── Phase 7.1: DebugConfig ──
+
+
+@given(
+    port=st.integers(min_value=-1000, max_value=70000),
+    token=st.text(max_size=20),
+)
+def test_prop_debug_config_disabled_accepts_any_port(port: int, token: str) -> None:
+    """When enabled=False, any port/token combination is accepted."""
+    cfg = DebugConfig(enabled=False, port=port, token=token)
+    assert not cfg.enabled
+    assert cfg.port == port
+
+
+@given(data=st.data())
+def test_prop_debug_config_enabled_valid_roundtrip(data: st.DataObject) -> None:
+    """A valid enabled DebugConfig can be constructed and read back."""
+    cfg = data.draw(st_debug_config(enabled=True))
+    assert cfg.enabled
+    assert 1024 <= cfg.port <= 65535
+    assert len(cfg.token.strip()) > 0
+
+
+def test_load_config_debug_disabled_default() -> None:
+    """Without a [debug] section, DebugConfig defaults to disabled."""
+    from strata.core.config import get_default_config
+
+    config = get_default_config()
+    assert not config.debug.enabled
+    assert config.debug.port == 0
+    assert config.debug.token == ""
+
+
+def test_parse_debug_enabled_no_token_raises() -> None:
+    """enabled=true with empty token raises ConfigError."""
+    import pytest
+
+    from strata.core.config import _parse_debug
+    from strata.core.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="token"):
+        _parse_debug({"enabled": True, "port": 8390, "token": ""})
+
+
+def test_parse_debug_enabled_bad_port_raises() -> None:
+    """enabled=true with out-of-range port raises ConfigError."""
+    import pytest
+
+    from strata.core.config import _parse_debug
+    from strata.core.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="port"):
+        _parse_debug({"enabled": True, "port": 80, "token": "secret"})
+
+
+def test_parse_debug_enabled_valid() -> None:
+    """enabled=true with valid port and token parses correctly."""
+    from strata.core.config import _parse_debug
+
+    cfg = _parse_debug(
+        {
+            "enabled": True,
+            "port": 8390,
+            "token": "my-secret",
+            "intercept_prompts": True,
+            "max_checkpoint_history": 30,
+        }
+    )
+    assert cfg.enabled
+    assert cfg.port == 8390
+    assert cfg.token == "my-secret"
+    assert cfg.intercept_prompts
+    assert cfg.max_checkpoint_history == 30

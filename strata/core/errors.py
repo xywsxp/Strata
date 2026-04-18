@@ -166,3 +166,18 @@ class LLMFeatureNotSupportedError(LLMError):
 
 class InteractionError(StrataError):
     """User interaction layer failure."""
+
+
+# ── Debug ──
+
+
+class DebugError(StrataError):
+    """Debug subsystem failure."""
+
+
+class DebugServerError(DebugError):
+    """HTTP/WS server lifecycle error (start/stop/bind)."""
+
+
+class DebugRollbackError(DebugError):
+    """Rollback operation failed (invalid version, empty undo stack, etc.)."""
