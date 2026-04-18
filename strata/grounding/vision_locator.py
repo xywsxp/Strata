@@ -109,10 +109,17 @@ class VisionLocator:
 
         start = time.monotonic()
         scroll_count = 0
+        screen_changed = True
 
         while scroll_count < self._config.max_scroll_attempts:
             if time.monotonic() - start > timeout:
                 raise ElementNotFoundError(f"timeout ({timeout}s) locating {description!r}")
+
+            if not screen_changed:
+                self._gui.scroll(0, self._config.scroll_step_pixels)
+                scroll_count += 1
+                screen_changed = True
+                continue
 
             screenshot = self._gui.capture_screen()
             response = self._call_vlm(screenshot, description, role)
@@ -123,17 +130,19 @@ class VisionLocator:
             if response.action_type == "scroll":
                 self._execute_scroll_action(response)
                 scroll_count += 1
+                screen_changed = True
                 continue
 
             if response.action_type == "next_page" and response.coordinate is not None:
                 self._gui.click(response.coordinate.x, response.coordinate.y)
                 time.sleep(self._config.wait_interval)
                 scroll_count += 1
+                screen_changed = True
                 continue
 
             if response.action_type == "not_found":
                 if scroll_count < self._config.max_scroll_attempts - 1:
-                    self._gui.scroll(0, self._config.scroll_step_pixels)
+                    screen_changed = False
                     scroll_count += 1
                     continue
                 break

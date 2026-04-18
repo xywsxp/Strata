@@ -132,7 +132,17 @@ class PrimitiveTaskExecutor:
 
     # ── GUI lane ──
 
-    _GUI_SETTLE_DELAY: Final[float] = 0.8
+    _GUI_SETTLE_DELAYS: Final[Mapping[str, float]] = {
+        "click": 0.5,
+        "double_click": 0.5,
+        "move_mouse": 0.0,
+        "type_text": 0.1,
+        "press_key": 0.1,
+        "hotkey": 0.1,
+        "scroll": 0.3,
+        "screenshot": 0.0,
+        "locate_and_click": 0.5,
+    }
 
     def _run_gui(self, action: str, task: TaskNode) -> ActionResult:
         fn = self._gui_dispatcher(action, task)
@@ -141,8 +151,9 @@ class PrimitiveTaskExecutor:
         else:
             with self._gui_lock:
                 result = self._call_safely(fn)
-        if result.success:
-            time.sleep(self._GUI_SETTLE_DELAY)
+        delay = self._GUI_SETTLE_DELAYS.get(action, 0.5)
+        if result.success and delay > 0:
+            time.sleep(delay)
         return result
 
     def _gui_dispatcher(self, action: str, task: TaskNode) -> Callable[[], ActionResult]:
