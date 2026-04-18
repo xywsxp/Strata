@@ -3,6 +3,7 @@
 6.3: Checkpoint roundtrip
 6.4: redact idempotency
 6.5: State machine transition legality
+6.6: New property tests (task roundtrip, scaler, sudo, cycle detection, etc.)
 """
 
 from __future__ import annotations
@@ -25,37 +26,12 @@ from strata.harness.state_machine import (
     VALID_GLOBAL_TRANSITIONS,
     create_global_state_machine,
 )
-
-# ── 6.3: Checkpoint roundtrip ──
-
-_GLOBAL_STATES = st.sampled_from(["INIT", "PLANNING", "EXECUTING", "COMPLETED", "FAILED"])
-_TASK_STATES = st.sampled_from(["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "SKIPPED"])
-
-
-@st.composite
-def st_checkpoint(draw: st.DrawFn) -> Checkpoint:
-    gs = draw(_GLOBAL_STATES)
-    n_tasks = draw(st.integers(min_value=0, max_value=5))
-    task_states = {f"t{i}": draw(_TASK_STATES) for i in range(n_tasks)}
-    ctx_keys = draw(
-        st.dictionaries(
-            keys=st.text(min_size=1, max_size=8, alphabet=st.characters(categories=["L"])),
-            values=st.text(max_size=20),
-            max_size=3,
-        )
-    )
-    context: dict[str, object] = {k: v for k, v in ctx_keys.items()}
-    nodes = tuple(
-        TaskNode(id=f"t{i}", task_type="primitive", action="click") for i in range(n_tasks)
-    )
-    graph = TaskGraph(goal="test", tasks=nodes)
-    return Checkpoint(
-        global_state=gs,  # type: ignore[arg-type]
-        task_states=task_states,  # type: ignore[arg-type]
-        context=context,
-        task_graph=graph,
-        timestamp=draw(st.floats(min_value=0.0, max_value=1e12, allow_nan=False)),
-    )
+from tests.strategies import (
+    st_checkpoint,
+    st_sudo_command,
+    st_task_graph_strategy,
+    st_task_node_strategy,
+)
 
 
 @given(cp=st_checkpoint())
@@ -160,3 +136,151 @@ def test_global_states_contains_all_literal_values() -> None:
         "FAILED",
     }
     assert expected == VALID_GLOBAL_STATES
+
+
+# ── 6.6.1: TaskNode roundtrip ──
+
+
+@given(node=st_task_node_strategy())
+@settings(max_examples=100)
+def test_prop_task_node_roundtrip(node: TaskNode) -> None:
+    """task_node_from_dict(task_node_to_dict(n)) preserves identity."""
+    from strata.core.types import task_node_from_dict, task_node_to_dict
+
+    d = task_node_to_dict(node)
+    restored = task_node_from_dict(d)
+    assert restored.id == node.id
+    assert restored.task_type == node.task_type
+    assert restored.action == node.action
+    assert restored.method == node.method
+    assert restored.depends_on == node.depends_on
+    assert restored.output_var == node.output_var
+    assert restored.max_iterations == node.max_iterations
+
+
+# ── 6.6.2: TaskGraph roundtrip ──
+
+
+@given(graph=st_task_graph_strategy())
+@settings(max_examples=50)
+def test_prop_task_graph_roundtrip(graph: TaskGraph) -> None:
+    """task_graph_from_dict(task_graph_to_dict(g)) preserves goal and task count."""
+    from strata.core.types import task_graph_from_dict, task_graph_to_dict
+
+    d = task_graph_to_dict(graph)
+    restored = task_graph_from_dict(d)
+    assert restored.goal == graph.goal
+    assert len(restored.tasks) == len(graph.tasks)
+    for orig, rest in zip(graph.tasks, restored.tasks, strict=True):
+        assert orig.id == rest.id
+        assert orig.task_type == rest.task_type
+
+
+# ── 6.6.3: validate_graph valid → empty errors ──
+
+
+@st.composite
+def _st_primitive_only_graph(draw: st.DrawFn) -> TaskGraph:
+    """Generate a graph with only primitive tasks (no compound method refs)."""
+    from tests.strategies import st_task_node
+
+    goal = draw(st.text(min_size=1, max_size=50))
+    n = draw(st.integers(min_value=1, max_value=10))
+    nodes: list[TaskNode] = []
+    for i in range(n):
+        node = draw(st_task_node(task_type="primitive"))
+        nodes.append(
+            TaskNode(
+                id=f"{node.id}_{i}",
+                task_type="primitive",
+                action=node.action,
+                params=node.params,
+                depends_on=(),
+                output_var=node.output_var,
+                max_iterations=None,
+            )
+        )
+    return TaskGraph(goal=goal, tasks=tuple(nodes))
+
+
+@given(graph=_st_primitive_only_graph())
+@settings(max_examples=50)
+def test_prop_validate_graph_valid_returns_empty(graph: TaskGraph) -> None:
+    """A well-formed primitive-only graph validates clean."""
+    from strata.planner.htn import validate_graph
+
+    errors = validate_graph(graph)
+    assert errors == [], f"unexpected validation errors: {errors}"
+
+
+# ── 6.6.4: validate_literal identity ──
+
+
+@given(value=st.sampled_from(sorted(VALID_GLOBAL_STATES)))
+@settings(max_examples=50)
+def test_prop_validate_literal_identity(value: str) -> None:
+    """validate_literal(v, valid, name) == v for any v in valid."""
+    from strata.core._validators import validate_literal
+
+    result = validate_literal(value, VALID_GLOBAL_STATES, "test_field")
+    assert result == value
+
+
+# ── 6.6.5: CoordinateScaler roundtrip ──
+
+
+@given(
+    x=st.floats(min_value=0.0, max_value=1000.0, allow_nan=False, allow_infinity=False),
+    y=st.floats(min_value=0.0, max_value=1000.0, allow_nan=False, allow_infinity=False),
+    scale=st.floats(min_value=0.1, max_value=10.0, allow_nan=False, allow_infinity=False),
+)
+@settings(max_examples=100)
+def test_prop_coordinate_scaler_roundtrip(x: float, y: float, scale: float) -> None:
+    """physical_to_logical(logical_to_physical(c)) ≈ c within float tolerance."""
+    from unittest.mock import MagicMock
+
+    from strata.core.types import Coordinate
+    from strata.grounding.scaler import CoordinateScaler
+
+    gui = MagicMock()
+    gui.get_dpi_scale_for_point.return_value = scale
+    scaler = CoordinateScaler(gui)
+    coord = Coordinate(x=x, y=y)
+    physical = scaler.logical_to_physical(coord)
+    back = scaler.physical_to_logical(physical)
+    assert abs(back.x - coord.x) < 1e-6, f"x: {back.x} != {coord.x}"
+    assert abs(back.y - coord.y) < 1e-6, f"y: {back.y} != {coord.y}"
+
+
+# ── 6.6.6: _detect_cycles acyclic ──
+
+
+@given(graph=st_task_graph_strategy())
+@settings(max_examples=50)
+def test_prop_detect_cycles_acyclic(graph: TaskGraph) -> None:
+    """An acyclic graph (no depends_on) has no cycles."""
+    from strata.planner.htn import _detect_cycles
+
+    errors = _detect_cycles(graph.tasks)
+    assert errors == []
+
+
+# ── 6.6.7: _sanitize_sudo idempotent ──
+
+
+@given(cmd=st_sudo_command())
+@settings(max_examples=100)
+def test_prop_sanitize_sudo_idempotent(cmd: str) -> None:
+    """f(f(cmd)) == f(cmd) — sanitization is a fixpoint."""
+    from unittest.mock import MagicMock
+
+    from strata.core.config import TerminalConfig
+    from strata.grounding.terminal_handler import TerminalHandler
+
+    handler = TerminalHandler(
+        MagicMock(),
+        TerminalConfig(command_timeout=30.0, silence_timeout=10.0, default_shell="/bin/sh"),
+    )
+    once = handler._sanitize_sudo(cmd)
+    twice = handler._sanitize_sudo(once)
+    assert once == twice, f"not idempotent: {cmd!r} -> {once!r} -> {twice!r}"

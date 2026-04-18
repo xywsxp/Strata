@@ -14,8 +14,10 @@ from typing import Literal, cast
 import hypothesis.strategies as st
 from hypothesis.strategies import SearchStrategy
 
+from strata.core._validators import VALID_GLOBAL_STATES
 from strata.core.types import ActionResult, CommandResult, Coordinate, TaskGraph, TaskNode
 from strata.harness.actions import ACTION_PARAM_SCHEMA, ACTION_VOCABULARY
+from strata.harness.persistence import Checkpoint
 
 _ALPHA_NUM = st.characters(categories=["L", "N"])
 _ALPHA = st.characters(categories=["L"])
@@ -308,3 +310,71 @@ def st_deterministic_mock_executor(
     """Draw a deterministic mock executor given (or sampled) success pattern."""
     pattern = success_pattern if success_pattern is not None else draw(st_failing_sequence())
     return _DeterministicExecutor(pattern)
+
+
+# ── Checkpoint strategy (migrated from test_properties.py) ──
+
+_GLOBAL_STATES = st.sampled_from(sorted(VALID_GLOBAL_STATES))
+_TASK_STATES = st.sampled_from(["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "SKIPPED"])
+
+
+@st.composite
+def st_checkpoint(draw: st.DrawFn) -> Checkpoint:
+    """Generate a Checkpoint with valid global/task states and a matching TaskGraph."""
+    gs = draw(_GLOBAL_STATES)
+    n_tasks = draw(st.integers(min_value=0, max_value=5))
+    task_states = {f"t{i}": draw(_TASK_STATES) for i in range(n_tasks)}
+    ctx_keys = draw(
+        st.dictionaries(
+            keys=st.text(min_size=1, max_size=8, alphabet=st.characters(categories=["L"])),
+            values=st.text(max_size=20),
+            max_size=3,
+        )
+    )
+    context: dict[str, object] = {k: v for k, v in ctx_keys.items()}
+    nodes = tuple(
+        TaskNode(id=f"t{i}", task_type="primitive", action="click") for i in range(n_tasks)
+    )
+    graph = TaskGraph(goal="test", tasks=nodes)
+    return Checkpoint(
+        global_state=gs,  # type: ignore[arg-type]
+        task_states=task_states,  # type: ignore[arg-type]
+        context=context,
+        task_graph=graph,
+        timestamp=draw(st.floats(min_value=0.0, max_value=1e12, allow_nan=False)),
+    )
+
+
+# ── sudo command strategy ──
+
+
+@st.composite
+def st_sudo_command(draw: st.DrawFn) -> str:
+    """Generate a shell command that may contain sudo in various positions.
+
+    Returns commands with sudo as the first token, after a pipe operator,
+    or after a semicolon/&& — covering the pipeline patterns that
+    _sanitize_sudo must handle.
+    """
+    base_cmd = draw(st.text(min_size=1, max_size=30, alphabet=_ALPHA_NUM))
+    pattern = draw(st.sampled_from(["simple", "pipe", "chain"]))
+    if pattern == "simple":
+        has_n = draw(st.booleans())
+        return f"sudo {'-n ' if has_n else ''}{base_cmd}"
+    elif pattern == "pipe":
+        prefix = draw(st.text(min_size=1, max_size=20, alphabet=_ALPHA_NUM))
+        has_n = draw(st.booleans())
+        return f"{prefix} | sudo {'-n ' if has_n else ''}{base_cmd}"
+    else:
+        prefix = draw(st.text(min_size=1, max_size=20, alphabet=_ALPHA_NUM))
+        sep = draw(st.sampled_from([";", "&&", "||"]))
+        has_n = draw(st.booleans())
+        return f"{prefix} {sep} sudo {'-n ' if has_n else ''}{base_cmd}"
+
+
+# ── Literal value strategy ──
+
+
+def st_valid_literal_value(valid: frozenset[str]) -> SearchStrategy[str]:
+    """Draw a value from a valid frozenset of literal strings."""
+    return st.sampled_from(sorted(valid))
