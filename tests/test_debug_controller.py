@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import threading
+from pathlib import Path
 
 import icontract
 import pytest
@@ -10,7 +12,8 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from strata.core.config import DebugConfig
-from strata.debug.controller import DebugController
+from strata.core.types import TaskGraph, TaskState
+from strata.debug.controller import DebugController, DebugState
 from tests.strategies import st_breakpoint_set, st_debug_event
 
 # ── Hypothesis properties ──
@@ -354,8 +357,6 @@ def test_skip_interception_uses_replace() -> None:
 
 def test_debug_state_literal_no_rolling_back() -> None:
     """ROLLING_BACK is removed from the DebugState Literal."""
-    from strata.debug.controller import DebugState
-
     # If ROLLING_BACK were still in the union, this isinstance check (via
     # get_args) would expose it.  Simply instantiate and verify state is
     # one of the four expected values.
@@ -421,3 +422,189 @@ def test_step_once_inactive_is_noop() -> None:
     ctrl = DebugController(cfg)
     ctrl.step_once()
     assert ctrl.debug_state == "INACTIVE"
+
+
+# ── edit_task tests (Phase 12.1) ──
+
+
+def _make_graph() -> tuple[TaskGraph, dict[str, TaskState]]:
+    from strata.core.types import TaskNode
+
+    g = TaskGraph(
+        goal="test",
+        tasks=(
+            TaskNode(id="t1", task_type="primitive", action="click", params={"x": 1}),
+            TaskNode(id="t2", task_type="primitive", action="type", params={"text": "hi"}),
+        ),
+    )
+    states: dict[str, TaskState] = {"t1": "SUCCEEDED", "t2": "PENDING"}
+    return g, states
+
+
+def test_edit_task_updates_params() -> None:
+    """edit_task on a PENDING task replaces params."""
+    cfg = DebugConfig(enabled=True, port=8390, token="t")
+    ctrl = DebugController(cfg)
+    g, states = _make_graph()
+    new_g = ctrl.edit_task("t2", states, g, params={"text": "world"})
+    assert isinstance(new_g, TaskGraph)
+    t2 = [t for t in new_g.tasks if t.id == "t2"][0]
+    assert t2.params == {"text": "world"}
+    # Original unchanged
+    orig_t2 = [t for t in g.tasks if t.id == "t2"][0]
+    assert orig_t2.params == {"text": "hi"}
+
+
+def test_edit_task_updates_action() -> None:
+    cfg = DebugConfig(enabled=True, port=8390, token="t")
+    ctrl = DebugController(cfg)
+    g, states = _make_graph()
+    new_g = ctrl.edit_task("t2", states, g, action="scroll")
+    t2 = [t for t in new_g.tasks if t.id == "t2"][0]
+    assert t2.action == "scroll"
+
+
+def test_edit_task_running_rejected() -> None:
+    from strata.core.errors import DebugRollbackError
+
+    cfg = DebugConfig(enabled=True, port=8390, token="t")
+    ctrl = DebugController(cfg)
+    g, _states = _make_graph()
+    states: dict[str, TaskState] = {"t1": "SUCCEEDED", "t2": "RUNNING"}
+    with pytest.raises(DebugRollbackError, match="RUNNING"):
+        ctrl.edit_task("t2", states, g)
+
+
+def test_edit_task_empty_task_id_rejected() -> None:
+    cfg = DebugConfig(enabled=True, port=8390, token="t")
+    ctrl = DebugController(cfg)
+    g, states = _make_graph()
+    with pytest.raises(icontract.ViolationError):
+        ctrl.edit_task("", states, g)
+
+
+@given(
+    params=st.dictionaries(
+        st.text(min_size=1, max_size=10, alphabet=st.characters(categories=["L"])),
+        st.integers(min_value=0, max_value=100),
+        max_size=5,
+    ),
+)
+def test_prop_edit_task_returns_new_graph_with_original_unchanged(
+    params: dict[str, int],
+) -> None:
+    """edit_task returns a new graph; original is unmodified."""
+    cfg = DebugConfig(enabled=True, port=8390, token="t")
+    ctrl = DebugController(cfg)
+    g, states = _make_graph()
+    original_params = dict(g.tasks[1].params)
+    new_g = ctrl.edit_task("t2", states, g, params=params)
+    assert isinstance(new_g, TaskGraph)
+    assert dict(g.tasks[1].params) == original_params
+
+
+# ── replan tests (Phase 12.2) ──
+
+
+def test_request_replan_sets_flag() -> None:
+    """request_replan in PAUSED sets replan goal."""
+    cfg = DebugConfig(enabled=True, port=8390, token="t")
+    ctrl = DebugController(cfg)
+    ctrl.enable_step_mode()
+    # Simulate pausing
+    import threading
+
+    paused = threading.Event()
+
+    def worker() -> None:
+        paused.set()
+        ctrl.await_step("t1")
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    paused.wait(timeout=2.0)
+    import time
+
+    time.sleep(0.1)  # let thread enter PAUSED
+    assert ctrl.debug_state == "PAUSED"
+    ctrl.request_replan("new goal")
+    goal = ctrl.consume_replan()
+    assert goal == "new goal"
+    assert ctrl.consume_replan() is None  # consumed
+    t.join(timeout=2.0)
+
+
+def test_request_replan_not_paused_rejected() -> None:
+    """request_replan on OBSERVING raises ViolationError."""
+    cfg = DebugConfig(enabled=True, port=8390, token="t")
+    ctrl = DebugController(cfg)
+    assert ctrl.debug_state == "OBSERVING"
+    with pytest.raises(icontract.ViolationError):
+        ctrl.request_replan("new goal")
+
+
+# ── vision image / persistence tests (Phase 12.3) ──
+
+
+def test_serialize_messages_includes_images() -> None:
+    """_serialize_messages with include_images=True includes base64 images."""
+    from strata.llm.provider import ChatMessage
+
+    msg = ChatMessage(role="user", content="look at this", images=(b"\x89PNG\r\n",))
+    result = DebugController._serialize_messages([msg], include_images=True)
+    assert len(result) == 1
+    assert "images" in result[0]
+    assert isinstance(result[0]["images"], list)
+    assert len(result[0]["images"]) == 1
+    assert result[0]["images"][0] != "image_too_large"
+
+
+def test_serialize_messages_respects_max_bytes() -> None:
+    """Large images are marked as image_too_large."""
+    from strata.llm.provider import ChatMessage
+
+    big_image = b"\x00" * 200_001
+    msg = ChatMessage(role="user", content="big", images=(big_image,))
+    result = DebugController._serialize_messages([msg], include_images=True, max_image_bytes=100)
+    assert result[0]["images"] == ["image_too_large"]
+
+
+def test_persist_record_writes_file(tmp_path: Path) -> None:
+    """record_llm_done persists to history_dir."""
+    from strata.llm.provider import ChatMessage
+
+    history_dir = tmp_path / "llm_history"
+    cfg = DebugConfig(enabled=True, port=8390, token="t", intercept_prompts=False)
+    ctrl = DebugController(cfg, history_dir=history_dir)
+    msg = ChatMessage(role="user", content="hello")
+    # Simulate gate + done
+    result = ctrl.gate("planner", [msg])
+    assert result is not None
+    ctrl.record_llm_done("planner", 100.0, [msg], "response text")
+    # Check file exists
+    files = list(history_dir.glob("*.json"))
+    assert len(files) == 1
+    data = json.loads(files[0].read_text())
+    assert data["status"] == "done"
+    assert data["response_text"] == "response text"
+
+
+def test_load_record_from_disk(tmp_path: Path) -> None:
+    """Evicted records are loaded from disk."""
+    from strata.llm.provider import ChatMessage
+
+    history_dir = tmp_path / "llm_history"
+    cfg = DebugConfig(enabled=True, port=8390, token="t", intercept_prompts=False)
+    ctrl = DebugController(cfg, history_dir=history_dir)
+    msg = ChatMessage(role="user", content="hello")
+    ctrl.gate("planner", [msg])
+    ctrl.record_llm_done("planner", 50.0, [msg], "resp")
+    # Get the seq
+    records = ctrl.get_llm_history()
+    seq = records[-1].seq
+    # Clear memory
+    ctrl._llm_history.clear()
+    # Should load from disk
+    rec = ctrl.get_llm_record(seq)
+    assert rec is not None
+    assert rec.response_text == "resp"

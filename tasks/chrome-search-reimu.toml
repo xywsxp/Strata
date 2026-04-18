@@ -1,27 +1,37 @@
 [task]
-id = "chrome-search-reimu"
-goal = """在 Ubuntu 桌面上使用 GUI 操作完成以下任务：
+id = "chrome-search-reimu-save-html"
+goal = """在 Ubuntu 桌面环境中，完全基于视觉感知和 GUI 交互完成以下 Web 检索与数据持久化任务。
 
-目标：打开 Google Chrome 浏览器，在 Google 上搜索「博丽灵梦」并点开第一个搜索结果。
+核心目标：
+1. 启动 Google Chrome 浏览器，利用搜索引擎（如 Google）检索关键词 "Reimu Hakurei"。
+2. 识别并点击第一条自然搜索结果（Organic Search Result）的超链接。
+3. 等待目标页面加载完成后，在页面主体的空白区域触发鼠标右键，在上下文菜单中选择“另存为... (Save as...)”。
+4. 在弹出的系统文件保存对话框中，直接按下 Enter 键，将网页以默认文件名完整保存到默认目录（通常为 ~/Downloads）。
 
-步骤指导（全部通过 GUI 操作）：
-1. 找到并点击桌面任务栏（左侧 Dock 或底部）中的 Google Chrome 图标启动浏览器
-   - Chrome 图标是一个红/绿/黄/蓝色的圆形图标
-   - 如果找不到图标，可以在终端输入 google-chrome 然后按 Enter
-2. 等待 Chrome 窗口打开完成
-3. 点击地址栏（页面顶部的 URL 输入框）
-4. 输入 www.google.com 然后按 Enter
-5. 等待 Google 首页加载完成
-6. 找到并点击 Google 搜索框（页面中间的大输入框）
-7. 输入搜索词：Reimu Hakurei 然后按 Enter
-8. 等待搜索结果页面加载完成
-9. 点击第一个搜索结果（第一条蓝色标题链接）
-
-重要要求：
-- 必须使用 Google Chrome 浏览器（不是 Firefox）
-- 必须使用 locate_and_click、type_text、press_key 等 GUI 动作
-- 不要使用 execute_command
-- 搜索关键词用英文 Reimu Hakurei（避免中文输入法问题）
+严格约束与验收标准：
+- 动作空间限制：全程只允许使用系统级 GUI 原语（如 locate_and_click, right_click, type_text, press_key 等）。严禁使用网络请求 API（如 curl/wget）作弊。
+- 输入鲁棒性：检索词强制使用英文 "Reimu Hakurei" 规避中文输入法干扰。
+- 时序控制：你需要自主判断页面是否渲染完毕以及文件是否保存成功。
 """
-tags = ["gui", "browser", "chrome"]
-timeout_s = 300
+tags = ["gui", "browser", "chrome", "file-dialog", "context-menu"]
+timeout_s = 400
+
+[setup]
+target = "osworld"
+# 强行杀掉残留的浏览器进程，并清空下载目录，防止前置测试用例的脏数据触发假阳性
+commands = [
+    "killall -9 chrome || true",
+    "rm -rf ~/Downloads/*"
+]
+
+[verify]
+target = "osworld"
+# 直接扫描 Downloads 目录下的落盘文件，使用 grep 匹配 HTML 源码中是否包含目标的强特征词
+command = """
+if ls ~/Downloads/*.html 1> /dev/null 2>&1; then
+    cat ~/Downloads/*.html | grep -iE 'Reimu|Hakurei' | head -n 1
+else
+    exit 1
+fi
+"""
+expected_stdout_regex = "(?i)(Reimu|Hakurei)"

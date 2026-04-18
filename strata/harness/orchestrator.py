@@ -247,6 +247,8 @@ class AgentOrchestrator:
                 cancel_fn=self.request_cancel,
                 restore_fn=self.restore_from_checkpoint,
                 graph_history_fn=lambda: self._graph_tracker.history(),
+                edit_task_fn=self._handle_task_edit_from_debug,
+                replan_fn=self._handle_replan_from_debug,
             )
             self._debug_server.start()
         else:
@@ -821,6 +823,33 @@ class AgentOrchestrator:
         finally:
             with self._ui_lock:
                 self._ui = saved_ui
+
+    def _handle_task_edit_from_debug(
+        self,
+        task_id: str,
+        params: Mapping[str, object] | None,
+        action: str | None,
+    ) -> None:
+        """Edit a PENDING task's params/action from the debug UI."""
+        if self._debug_controller is None or self._last_graph is None:
+            msg = "no active graph or debug controller"
+            raise RuntimeError(msg)
+        new_graph = self._debug_controller.edit_task(
+            task_id=task_id,
+            task_states=dict(self._task_states),
+            graph=self._last_graph,
+            params=params,
+            action=action,
+        )
+        self._last_graph = new_graph
+        self._graph_tracker.update(new_graph, f"edit_task:{task_id}")
+
+    def _handle_replan_from_debug(self, new_goal: str) -> None:
+        """Trigger a replan via the debug controller."""
+        if self._debug_controller is None:
+            msg = "no debug controller"
+            raise RuntimeError(msg)
+        self._debug_controller.request_replan(new_goal)
 
     def request_cancel(self) -> None:
         """Signal cooperative cancellation for the current goal."""

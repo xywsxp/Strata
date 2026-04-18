@@ -4,17 +4,22 @@ prompt interception, LLM transcript history.
 
 from __future__ import annotations
 
+import base64
 import itertools
+import json
 import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 import icontract
 
 from strata.core.config import DebugConfig
+from strata.core.errors import DebugRollbackError
+from strata.core.types import TaskGraph, TaskNode, TaskState
 
 if TYPE_CHECKING:
     from strata.llm.provider import ChatMessage
@@ -62,9 +67,11 @@ class DebugController:
         self,
         config: DebugConfig,
         interrupt_check: Callable[[], bool] | None = None,
+        history_dir: Path | None = None,
     ) -> None:
         self._config = config
         self._interrupt_check = interrupt_check
+        self._history_dir = history_dir
         self._lock = threading.Lock()
         self._debug_state: DebugState = "OBSERVING" if config.enabled else "INACTIVE"
         self._last_global_state: str = "INIT"
@@ -81,6 +88,7 @@ class DebugController:
         self._llm_history: dict[int, LLMRecord] = {}
         self._llm_seq: itertools.count[int] = itertools.count(1)
         self._llm_pending: dict[str, int] = {}  # role -> most-recent pending seq
+        self._replan_goal: str | None = None
 
     @property
     def debug_state(self) -> DebugState:
@@ -230,15 +238,17 @@ class DebugController:
         with self._lock:
             seq = self._llm_pending.pop(role, 0)
             if seq:
-                self._llm_history[seq] = LLMRecord(
+                rec = LLMRecord(
                     seq=seq,
                     role=role,
                     started_at=time.time() - duration_ms / 1000,
                     duration_ms=duration_ms,
                     status="done",
-                    request_messages=self._serialize_messages(messages),
+                    request_messages=self._serialize_messages(messages, include_images=True),
                     response_text=resp_text[:10000],
                 )
+                self._llm_history[seq] = rec
+                self._persist_record(rec)
         if seq:
             self.log_event(
                 "llm_done",
@@ -257,7 +267,7 @@ class DebugController:
         with self._lock:
             seq = self._llm_pending.pop(role, 0)
             if seq:
-                self._llm_history[seq] = LLMRecord(
+                rec = LLMRecord(
                     seq=seq,
                     role=role,
                     started_at=time.time() - duration_ms / 1000,
@@ -267,6 +277,8 @@ class DebugController:
                     error_type=type(error).__name__,
                     error_msg=str(error)[:2000],
                 )
+                self._llm_history[seq] = rec
+                self._persist_record(rec)
         if seq:
             self.log_event(
                 "llm_error",
@@ -280,22 +292,84 @@ class DebugController:
             return list(self._llm_history.values())
 
     def get_llm_record(self, seq: int) -> LLMRecord | None:
-        """Return a specific LLM record by sequence number."""
+        """Return a specific LLM record by sequence number.
+
+        Falls back to disk if evicted from memory.
+        """
         with self._lock:
-            return self._llm_history.get(seq)
+            rec = self._llm_history.get(seq)
+        if rec is not None:
+            return rec
+        return self._load_record_from_disk(seq)
 
     @staticmethod
     def _serialize_messages(
         messages: Sequence[ChatMessage],
+        include_images: bool = False,
+        max_image_bytes: int = 200_000,
     ) -> list[dict[str, object]]:
-        return [
-            {
+        result: list[dict[str, object]] = []
+        for m in messages:
+            entry: dict[str, object] = {
                 "role": m.role,
                 "content": m.content,
                 "has_images": bool(m.images),
             }
-            for m in messages
-        ]
+            if include_images and m.images:
+                images: list[str] = []
+                for img_bytes in m.images:
+                    encoded = base64.b64encode(img_bytes).decode("ascii")
+                    if len(encoded) > max_image_bytes:
+                        images.append("image_too_large")
+                    else:
+                        images.append(encoded)
+                entry["images"] = images
+            result.append(entry)
+        return result
+
+    def _persist_record(self, record: LLMRecord) -> None:
+        """Write a completed LLM record to history_dir/{seq}.json."""
+        if self._history_dir is None:
+            return
+        self._history_dir.mkdir(parents=True, exist_ok=True)
+        path = self._history_dir / f"{record.seq}.json"
+        data = {
+            "seq": record.seq,
+            "role": record.role,
+            "started_at": record.started_at,
+            "duration_ms": record.duration_ms,
+            "status": record.status,
+            "request_messages": [dict(m) for m in record.request_messages],
+            "response_text": record.response_text,
+            "error_type": record.error_type,
+            "error_msg": record.error_msg,
+        }
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        tmp.rename(path)
+
+    def _load_record_from_disk(self, seq: int) -> LLMRecord | None:
+        """Try to load an evicted LLM record from disk."""
+        if self._history_dir is None:
+            return None
+        path = self._history_dir / f"{seq}.json"
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return LLMRecord(
+                seq=data["seq"],
+                role=data["role"],
+                started_at=data["started_at"],
+                duration_ms=data["duration_ms"],
+                status=data["status"],
+                request_messages=data.get("request_messages", []),
+                response_text=data.get("response_text", ""),
+                error_type=data.get("error_type", ""),
+                error_msg=data.get("error_msg", ""),
+            )
+        except (json.JSONDecodeError, KeyError):
+            return None
 
     # ── prompt interception ──
 
@@ -410,6 +484,70 @@ class DebugController:
             if self._pending_prompt is not None:
                 return dict(self._pending_prompt)
             return None
+
+    # ── task editing ──
+
+    @icontract.require(
+        lambda self: self._debug_state in ("PAUSED", "OBSERVING"),
+        "edit_task requires debug to be active and not in prompt editing",
+    )
+    @icontract.require(
+        lambda task_id: len(task_id.strip()) > 0,
+        "task_id must be non-empty",
+    )
+    def edit_task(
+        self,
+        task_id: str,
+        task_states: Mapping[str, TaskState],
+        graph: TaskGraph,
+        params: Mapping[str, object] | None = None,
+        action: str | None = None,
+    ) -> TaskGraph:
+        """Return a new TaskGraph with the specified task's params/action replaced.
+
+        Raises DebugRollbackError if the task is not in PENDING state.
+        """
+        state = task_states.get(task_id)
+        if state is None:
+            raise DebugRollbackError(f"task {task_id!r} not found in task_states")
+        if state != "PENDING":
+            raise DebugRollbackError(f"task {task_id!r} is {state}, not PENDING — rollback first")
+        new_tasks: list[TaskNode] = []
+        found = False
+        for t in graph.tasks:
+            if t.id == task_id:
+                found = True
+                new_params = dict(params) if params is not None else dict(t.params)
+                new_action = action if action is not None else t.action
+                new_tasks.append(replace(t, params=new_params, action=new_action))
+            else:
+                new_tasks.append(t)
+        if not found:
+            raise DebugRollbackError(f"task {task_id!r} not found in graph")
+        return replace(graph, tasks=tuple(new_tasks))
+
+    # ── replan ──
+
+    @icontract.require(
+        lambda self: self._debug_state == "PAUSED",
+        "replan requires PAUSED state",
+    )
+    @icontract.require(
+        lambda new_goal: len(new_goal.strip()) > 0,
+        "new_goal must be non-empty",
+    )
+    def request_replan(self, new_goal: str) -> None:
+        """Signal the orchestrator to re-plan with a new goal."""
+        with self._lock:
+            self._replan_goal = new_goal
+        self._proceed.set()
+
+    def consume_replan(self) -> str | None:
+        """Return and clear the pending replan goal, if any."""
+        with self._lock:
+            goal = self._replan_goal
+            self._replan_goal = None
+            return goal
 
 
 @runtime_checkable

@@ -73,6 +73,8 @@ class DebugServer:
         cancel_fn: Callable[[], None] | None = None,
         restore_fn: Callable[[Checkpoint], None] | None = None,
         graph_history_fn: Callable[[], Sequence[tuple[object, str, float]]] | None = None,
+        edit_task_fn: Callable[[str, Mapping[str, object] | None, str | None], None] | None = None,
+        replan_fn: Callable[[str], None] | None = None,
     ) -> None:
         self._controller = controller
         self._config = config
@@ -85,6 +87,8 @@ class DebugServer:
         self._cancel_fn = cancel_fn
         self._restore_fn = restore_fn
         self._graph_history_fn = graph_history_fn
+        self._edit_task_fn = edit_task_fn
+        self._replan_fn = replan_fn
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._runner: aiohttp.web.AppRunner | None = None
@@ -166,6 +170,8 @@ class DebugServer:
         app.router.add_get("/api/llm/history", self._handle_llm_history)
         app.router.add_get("/api/llm/history/{seq}", self._handle_llm_record)
         app.router.add_get("/api/graph/history", self._handle_graph_history)
+        app.router.add_post("/api/task/edit", self._handle_task_edit)
+        app.router.add_post("/api/goal/edit", self._handle_goal_edit)
         self._runner = aiohttp.web.AppRunner(app)
         await self._runner.setup()
         site = aiohttp.web.TCPSite(self._runner, "0.0.0.0", self._config.port)
@@ -539,3 +545,39 @@ class DebugServer:
             )
         current_version = len(versions)
         return aiohttp.web.json_response({"versions": versions, "current_version": current_version})
+
+    async def _handle_task_edit(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        """POST /api/task/edit — edit a PENDING task's params or action."""
+        if self._edit_task_fn is None:
+            return aiohttp.web.json_response({"error": "task editing not available"}, status=503)
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, Exception):
+            return aiohttp.web.json_response({"error": "invalid JSON"}, status=400)
+        task_id = body.get("task_id", "")
+        if not isinstance(task_id, str) or not task_id.strip():
+            return aiohttp.web.json_response({"error": "task_id required"}, status=400)
+        params = body.get("params")
+        action = body.get("action")
+        try:
+            self._edit_task_fn(task_id, params, action)
+        except Exception as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
+        return aiohttp.web.json_response({"ok": True, "task_id": task_id})
+
+    async def _handle_goal_edit(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        """POST /api/goal/edit — trigger a replan with a new goal."""
+        if self._replan_fn is None:
+            return aiohttp.web.json_response({"error": "replanning not available"}, status=503)
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, Exception):
+            return aiohttp.web.json_response({"error": "invalid JSON"}, status=400)
+        goal = body.get("goal", "")
+        if not isinstance(goal, str) or not goal.strip():
+            return aiohttp.web.json_response({"error": "goal must be non-empty"}, status=400)
+        try:
+            self._replan_fn(goal.strip())
+        except Exception as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
+        return aiohttp.web.json_response({"ok": True, "goal": goal.strip()})

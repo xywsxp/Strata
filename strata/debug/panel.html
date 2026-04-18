@@ -277,6 +277,7 @@ textarea{resize:vertical;min-height:68px;line-height:1.5}
         <input type="checkbox" id="step-mode-check" onchange="applyStepMode()">
         Pause before each task
       </label>
+      <button class="btn btn-sm" id="btn-edit-goal" onclick="openReplanModal()" style="margin-top:4px;display:none">✏ Edit Goal &amp; Replan</button>
     </div>
   </div>
 
@@ -461,6 +462,42 @@ textarea{resize:vertical;min-height:68px;line-height:1.5}
   </div>
 </div>
 
+<!-- ─── Task edit modal ─── -->
+<div id="task-edit-modal" class="modal-bg">
+  <div class="modal" style="min-width:460px">
+    <h3>✏️ Edit Task</h3>
+    <div id="task-edit-id" style="font-size:11px;color:var(--muted);margin-bottom:8px"></div>
+    <div style="margin-bottom:6px">
+      <label style="font-size:11px;font-weight:600">Action</label>
+      <input type="text" id="task-edit-action" style="width:100%">
+    </div>
+    <div style="margin-bottom:6px">
+      <label style="font-size:11px;font-weight:600">Params (JSON)</label>
+      <textarea id="task-edit-params" style="min-height:100px;font-family:'JetBrains Mono',monospace;font-size:11px"></textarea>
+    </div>
+    <div id="task-edit-error" style="color:var(--red);font-size:11px;display:none;margin-bottom:6px"></div>
+    <div class="footer">
+      <button class="btn" onclick="closeTaskEditModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveTaskEdit()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Replan modal ─── -->
+<div id="replan-modal" class="modal-bg">
+  <div class="modal" style="min-width:460px">
+    <h3>🔄 Edit Goal &amp; Replan</h3>
+    <div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:8px;margin-bottom:10px;font-size:11px;color:#92400e">
+      ⚠️ Replan will regenerate the task graph. SUCCEEDED task results are preserved. Non-completed tasks will be reset to PENDING.
+    </div>
+    <textarea id="replan-goal" style="min-height:80px" placeholder="New goal…"></textarea>
+    <div id="replan-error" style="color:var(--red);font-size:11px;display:none;margin-top:4px"></div>
+    <div class="footer">
+      <button class="btn" onclick="closeReplanModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="confirmReplan()">Confirm Replan</button>
+    </div>
+  </div>
+</div>
 
 
 <script>
@@ -546,6 +583,8 @@ function renderState(d) {
   hds.textContent = ds;
   hds.className = 'badge ' + (ds === 'OBSERVING' ? 'badge-ok' : ds === 'PAUSED' ? 'badge-warn' : ds === 'EDITING_PROMPT' ? 'badge-blue' : 'badge-idle');
   document.getElementById('paused-bar').classList.toggle('show', ds === 'PAUSED');
+  const editGoalBtn = document.getElementById('btn-edit-goal');
+  if (editGoalBtn) editGoalBtn.style.display = ds === 'PAUSED' ? '' : 'none';
 
   // intercept badge
   if (d.intercept_prompts !== undefined) {
@@ -625,6 +664,9 @@ function showTaskDetail(taskId) {
   const state = _cachedTaskStates[taskId] || 'PENDING';
   const el = document.getElementById('task-detail-body');
   const params = task.params ? JSON.stringify(task.params, null, 2) : '{}';
+  const editBtn = state === 'PENDING'
+    ? `<button class="btn btn-sm" style="margin-top:6px" onclick="openTaskEditModal('${escapeHtml(task.id)}')">✏ Edit</button>`
+    : `<div style="font-size:10px;color:var(--muted);margin-top:6px">Task is ${state}. Rollback to PENDING first to edit.</div>`;
   el.innerHTML = `
     <div class="kv"><span class="k">ID</span><span class="v" style="color:var(--accent)">${escapeHtml(task.id)}</span></div>
     <div class="kv"><span class="k">Type</span><span class="v">${escapeHtml(task.task_type || '')}</span></div>
@@ -634,12 +676,91 @@ function showTaskDetail(taskId) {
     <div class="kv"><span class="k">Output</span><span class="v">${escapeHtml(task.output_var || '—')}</span></div>
     <div style="margin-top:6px;font-size:10px;font-weight:600;color:var(--muted)">PARAMS</div>
     <pre style="font-size:10px;background:var(--bg);padding:6px;border-radius:4px;max-height:80px;overflow-y:auto;margin-top:4px">${escapeHtml(params)}</pre>
+    ${editBtn}
   `;
   document.getElementById('task-detail').style.display = '';
 }
 
 function hideTaskDetail() {
   document.getElementById('task-detail').style.display = 'none';
+}
+
+// ─── Task Edit Modal ───
+let _editingTaskId = null;
+
+function openTaskEditModal(taskId) {
+  if (!_cachedGraphData || !_cachedGraphData.tasks) return;
+  const task = _cachedGraphData.tasks.find(t => t.id === taskId);
+  if (!task) return;
+  _editingTaskId = taskId;
+  document.getElementById('task-edit-id').textContent = 'Task: ' + taskId;
+  document.getElementById('task-edit-action').value = task.action || '';
+  document.getElementById('task-edit-params').value = task.params ? JSON.stringify(task.params, null, 2) : '{}';
+  document.getElementById('task-edit-error').style.display = 'none';
+  document.getElementById('task-edit-modal').classList.add('show');
+}
+
+function closeTaskEditModal() {
+  document.getElementById('task-edit-modal').classList.remove('show');
+  _editingTaskId = null;
+}
+
+async function saveTaskEdit() {
+  if (!_editingTaskId) return;
+  const action = document.getElementById('task-edit-action').value.trim() || null;
+  const paramsText = document.getElementById('task-edit-params').value.trim();
+  let params = null;
+  if (paramsText && paramsText !== '{}') {
+    try {
+      params = JSON.parse(paramsText);
+      if (typeof params !== 'object' || Array.isArray(params)) throw new Error('must be object');
+    } catch(e) {
+      const errEl = document.getElementById('task-edit-error');
+      errEl.textContent = 'Invalid JSON: ' + e.message;
+      errEl.style.display = '';
+      return;
+    }
+  }
+  const r = await api('/api/task/edit', 'POST', { task_id: _editingTaskId, params, action });
+  if (r && r.error) {
+    const errEl = document.getElementById('task-edit-error');
+    errEl.textContent = r.error;
+    errEl.style.display = '';
+    return;
+  }
+  closeTaskEditModal();
+  refreshGraph();
+  showTaskDetail(_editingTaskId);
+}
+
+// ─── Replan Modal ───
+function openReplanModal() {
+  const goalInput = document.getElementById('goal-input');
+  document.getElementById('replan-goal').value = goalInput ? goalInput.value : '';
+  document.getElementById('replan-error').style.display = 'none';
+  document.getElementById('replan-modal').classList.add('show');
+}
+function closeReplanModal() {
+  document.getElementById('replan-modal').classList.remove('show');
+}
+async function confirmReplan() {
+  const goal = document.getElementById('replan-goal').value.trim();
+  if (!goal) {
+    const errEl = document.getElementById('replan-error');
+    errEl.textContent = 'Goal cannot be empty';
+    errEl.style.display = '';
+    return;
+  }
+  const r = await api('/api/goal/edit', 'POST', { goal });
+  if (r && r.error) {
+    const errEl = document.getElementById('replan-error');
+    errEl.textContent = r.error;
+    errEl.style.display = '';
+    return;
+  }
+  closeReplanModal();
+  refreshState();
+  refreshGraph();
 }
 
 async function addBp() {
@@ -1295,9 +1416,19 @@ async function _loadDetailContent(detailEl, seq) {
 function _buildDetailHtml(d) {
   let html = '';
   (d.request_messages || []).forEach(m => {
+    let imgHtml = '';
+    if (m.images && m.images.length) {
+      imgHtml = m.images.map(img => {
+        if (img === 'image_too_large') {
+          return '<div style="color:var(--muted);font-size:10px;padding:4px;background:var(--bg);border-radius:4px;margin:4px 0">[Image too large for inline preview]</div>';
+        }
+        return `<img src="data:image/png;base64,${img}" style="max-width:100%;max-height:200px;margin:4px 0;border-radius:4px">`;
+      }).join('');
+    }
     html += `<div class="msg-block">
       <div class="msg-role ${escapeHtml(m.role)}">${escapeHtml(m.role)}${m.has_images?' (📷)':''}</div>
       <div class="msg-content">${escapeHtml(m.content || '')}</div>
+      ${imgHtml}
     </div>`;
   });
   if (d.response_text) {
