@@ -6,7 +6,7 @@ import argparse
 import sys
 
 from strata import StrataError
-from strata.core.config import load_config
+from strata.core.config import load_config, load_config_with_overlays
 from strata.core.errors import ConfigError
 from strata.env.factory import EnvironmentFactory
 from strata.grounding.filter import redact
@@ -37,10 +37,21 @@ def main() -> None:
         default=None,
         help="Path to config TOML (default: ~/.strata/config.toml)",
     )
+    parser.add_argument(
+        "--debug-config",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Optional debug overlay TOML (e.g. config/debug.toml); "
+        "merges [debug] section on top of the base config.",
+    )
     args = parser.parse_args()
 
     try:
-        config = load_config(args.config)
+        if args.debug_config:
+            config = load_config_with_overlays(args.config, args.debug_config)
+        else:
+            config = load_config(args.config)
     except ConfigError as exc:
         print(f"[Strata] Config error: {redact(str(exc))}", file=sys.stderr)
         sys.exit(1)

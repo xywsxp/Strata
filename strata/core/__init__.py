@@ -7,6 +7,7 @@ from strata.core.config import (
     StrataConfig,
     get_default_config,
     load_config,
+    load_config_with_overlays,
 )
 from strata.core.errors import (
     ActionParamsError,
@@ -126,6 +127,7 @@ __all__ = [
     "WindowInfo",
     "get_default_config",
     "load_config",
+    "load_config_with_overlays",
     "task_graph_from_dict",
     "task_graph_to_dict",
     "task_node_from_dict",

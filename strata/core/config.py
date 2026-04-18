@@ -319,48 +319,7 @@ def load_config(path: str | None = None) -> StrataConfig:
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"invalid TOML: {exc}") from exc
 
-    providers = _parse_providers(data.get("providers"))
-    roles = _parse_roles(data.get("roles"), providers)
-    sandbox = _parse_sandbox(data.get("sandbox"))
-    terminal = _parse_terminal(data.get("terminal"))
-    gui = _parse_gui(data.get("gui"))
-    memory = _parse_memory(data.get("memory"))
-    paths = _parse_paths(data.get("paths"))
-    osworld = _parse_osworld(data.get("osworld"))
-    debug = _parse_debug(data.get("debug"))
-
-    dangerous_raw = data.get("dangerous_patterns", ())
-    dangerous: tuple[str, ...]
-    if isinstance(dangerous_raw, (list, tuple)):
-        dangerous = tuple(str(p) for p in dangerous_raw)
-    else:
-        dangerous = ()
-
-    return StrataConfig(
-        log_level=str(data.get("log_level", "INFO")),
-        audit_log=_expand(str(data.get("audit_log", "~/.strata/audit.jsonl"))),
-        trash_dir=_expand(str(data.get("trash_dir", "~/.strata/trash"))),
-        providers=providers,
-        roles=roles,
-        sandbox=sandbox,
-        gui=gui,
-        terminal=terminal,
-        memory=memory,
-        osworld=osworld,
-        paths=paths,
-        max_loop_iterations=int(data.get("max_loop_iterations", 50)),
-        dangerous_patterns=dangerous,
-        auto_confirm_level=cast(
-            Literal["none", "low", "medium", "high"],
-            validate_literal(
-                str(data.get("auto_confirm_level", "low")),
-                VALID_AUTO_CONFIRM,
-                "auto_confirm_level",
-                config_error=True,
-            ),
-        ),
-        debug=debug,
-    )
+    return _parse_config_dict(data)
 
 
 def get_default_config() -> StrataConfig:
@@ -426,4 +385,97 @@ def get_default_config() -> StrataConfig:
         dangerous_patterns=("rm -rf", "mkfs", "dd if=", "> /dev/", "chmod 777"),
         auto_confirm_level="low",
         debug=DebugConfig(enabled=False, port=0, token=""),
+    )
+
+
+def load_config_with_overlays(
+    base_path: str | None = None,
+    *overlay_paths: str,
+) -> StrataConfig:
+    """Load a base config TOML then apply zero or more overlay files.
+
+    Top-level TOML sections are shallow-merged; later files win.
+    Overlay files that do not exist are silently skipped.
+
+    Typical usage::
+
+        cfg = load_config_with_overlays(
+            "config/local.toml",
+            "config/debug.toml",   # adds / overrides [debug] section only
+        )
+    """
+    base: dict[str, object] = {}
+    if base_path is not None:
+        resolved = Path(base_path).expanduser()
+        try:
+            base = tomllib.loads(resolved.read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise ConfigError(f"cannot read config file: {exc}") from exc
+        except tomllib.TOMLDecodeError as exc:
+            raise ConfigError(f"invalid TOML in {base_path}: {exc}") from exc
+
+    for overlay_path in overlay_paths:
+        ov_resolved = Path(overlay_path).expanduser()
+        if not ov_resolved.is_file():
+            continue
+        try:
+            overlay = tomllib.loads(ov_resolved.read_text(encoding="utf-8"))
+        except tomllib.TOMLDecodeError as exc:
+            raise ConfigError(f"invalid TOML in {overlay_path}: {exc}") from exc
+        for k, v in overlay.items():
+            if isinstance(v, dict) and isinstance(base.get(k), dict):
+                existing = base[k]
+                assert isinstance(existing, dict)
+                merged: dict[str, object] = {**existing, **v}
+                # mypy: existing and v are both dict[str, object] after isinstance check
+                base[k] = merged
+            else:
+                base[k] = v
+
+    return _parse_config_dict(base)
+
+
+def _parse_config_dict(data: dict[str, object]) -> StrataConfig:
+    """Parse a pre-loaded TOML dict into a StrataConfig."""
+    providers = _parse_providers(data.get("providers"))
+    roles = _parse_roles(data.get("roles"), providers)
+    sandbox = _parse_sandbox(data.get("sandbox"))
+    terminal = _parse_terminal(data.get("terminal"))
+    gui = _parse_gui(data.get("gui"))
+    memory = _parse_memory(data.get("memory"))
+    paths = _parse_paths(data.get("paths"))
+    osworld = _parse_osworld(data.get("osworld"))
+    debug = _parse_debug(data.get("debug"))
+
+    dangerous_raw = data.get("dangerous_patterns", ())
+    dangerous: tuple[str, ...]
+    if isinstance(dangerous_raw, (list, tuple)):
+        dangerous = tuple(str(p) for p in dangerous_raw)
+    else:
+        dangerous = ()
+
+    return StrataConfig(
+        log_level=str(data.get("log_level", "INFO")),
+        audit_log=_expand(str(data.get("audit_log", "~/.strata/audit.jsonl"))),
+        trash_dir=_expand(str(data.get("trash_dir", "~/.strata/trash"))),
+        providers=providers,
+        roles=roles,
+        sandbox=sandbox,
+        gui=gui,
+        terminal=terminal,
+        memory=memory,
+        osworld=osworld,
+        paths=paths,
+        max_loop_iterations=int(str(data.get("max_loop_iterations", 50))),
+        dangerous_patterns=dangerous,
+        auto_confirm_level=cast(
+            Literal["none", "low", "medium", "high"],
+            validate_literal(
+                str(data.get("auto_confirm_level", "low")),
+                VALID_AUTO_CONFIRM,
+                "auto_confirm_level",
+                config_error=True,
+            ),
+        ),
+        debug=debug,
     )

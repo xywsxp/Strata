@@ -211,6 +211,11 @@ config.toml
 .strata-run/
 reports/
 
+# Strata local config — contains API keys and tokens, never commit
+config/local.toml
+config/debug.toml
+config/*.local.toml
+
 # User preference: do not track markdown or lockfiles in this repo
 *.md
 *.lock
