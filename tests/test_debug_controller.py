@@ -212,3 +212,72 @@ def test_interrupt_check_unblocks_await() -> None:
     assert released.wait(timeout=2.0)
     assert ctrl.debug_state == "OBSERVING"
     t.join(timeout=2.0)
+
+
+# ── Prompt interception tests ──
+
+
+def test_gate_passthrough_when_disabled() -> None:
+    """gate returns messages unchanged when intercept_prompts is off."""
+    from strata.llm.provider import ChatMessage
+
+    cfg = DebugConfig(enabled=True, port=8390, token="t", intercept_prompts=False)
+    ctrl = DebugController(cfg)
+    msgs = [ChatMessage(role="user", content="hello")]
+    result = ctrl.gate("planner", msgs)
+    assert list(result) == msgs
+
+
+def test_gate_passthrough_when_inactive() -> None:
+    from strata.llm.provider import ChatMessage
+
+    cfg = DebugConfig(enabled=False, port=0, token="", intercept_prompts=True)
+    ctrl = DebugController(cfg)
+    msgs = [ChatMessage(role="user", content="hello")]
+    result = ctrl.gate("planner", msgs)
+    assert list(result) == msgs
+
+
+def test_gate_blocks_until_approved() -> None:
+    from strata.llm.provider import ChatMessage
+
+    cfg = DebugConfig(enabled=True, port=8390, token="t", intercept_prompts=True)
+    ctrl = DebugController(cfg)
+    msgs = [ChatMessage(role="user", content="hello")]
+    released = threading.Event()
+    result_box: list[object] = []
+
+    def worker() -> None:
+        result_box.append(ctrl.gate("planner", msgs))
+        released.set()
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    assert not released.wait(timeout=0.15)
+    state: str = ctrl.debug_state
+    assert state == "EDITING_PROMPT"
+    assert ctrl.get_pending_prompt() is not None
+    ctrl.approve_prompt()
+    assert released.wait(timeout=2.0)
+    assert list(result_box[0]) == msgs  # type: ignore[call-overload]
+    t.join(timeout=2.0)
+
+
+def test_skip_interception_unblocks_gate() -> None:
+    from strata.llm.provider import ChatMessage
+
+    cfg = DebugConfig(enabled=True, port=8390, token="t", intercept_prompts=True)
+    ctrl = DebugController(cfg)
+    msgs = [ChatMessage(role="user", content="hello")]
+    released = threading.Event()
+
+    def worker() -> None:
+        ctrl.gate("planner", msgs)
+        released.set()
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    assert not released.wait(timeout=0.15)
+    ctrl.skip_interception()
+    assert released.wait(timeout=2.0)
+    t.join(timeout=2.0)

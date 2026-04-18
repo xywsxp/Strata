@@ -1,4 +1,6 @@
-"""Thread-safe debug controller — event queue, snapshots, step mode, breakpoints."""
+"""Thread-safe debug controller — event queue, snapshots, step mode, breakpoints,
+prompt interception.
+"""
 
 from __future__ import annotations
 
@@ -7,11 +9,14 @@ import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 import icontract
 
 from strata.core.config import DebugConfig
+
+if TYPE_CHECKING:
+    from strata.llm.provider import ChatMessage
 
 DebugState = Literal["INACTIVE", "OBSERVING", "PAUSED", "EDITING_PROMPT", "ROLLING_BACK"]
 
@@ -49,6 +54,10 @@ class DebugController:
         self._breakpoints: set[str] = set()
         self._proceed = threading.Event()
         self._proceed.set()
+        self._pending_prompt: dict[str, object] | None = None
+        self._prompt_approved = threading.Event()
+        self._prompt_approved.set()
+        self._edited_messages: Sequence[ChatMessage] | None = None
 
     @property
     def debug_state(self) -> DebugState:
@@ -147,3 +156,97 @@ class DebugController:
     def list_breakpoints(self) -> frozenset[str]:
         with self._lock:
             return frozenset(self._breakpoints)
+
+    # ── prompt interception ──
+
+    def gate(
+        self,
+        role: str,
+        messages: Sequence[ChatMessage],
+    ) -> Sequence[ChatMessage]:
+        """Block until prompt approved/edited; return (possibly modified) messages.
+
+        When ``intercept_prompts`` is off or state is INACTIVE, passes through.
+        """
+        with self._lock:
+            if self._debug_state == "INACTIVE" or not self._config.intercept_prompts:
+                return messages
+            self._pending_prompt = {
+                "role": role,
+                "messages": [
+                    {"role": m.role, "content": m.content, "has_images": bool(m.images)}
+                    for m in messages
+                ],
+            }
+            self._prompt_approved = threading.Event()
+            self._edited_messages = None
+            prev_state = self._debug_state
+            self._debug_state = "EDITING_PROMPT"
+
+        self._event_queue.append(
+            DebugEvent(
+                event="prompt_pending",
+                global_state=self._last_global_state,
+                task_states=dict(self._last_task_states),
+                timestamp=time.time(),
+            )
+        )
+
+        while True:
+            if self._prompt_approved.wait(timeout=0.05):
+                break
+            if self._interrupt_check is not None and self._interrupt_check():
+                with self._lock:
+                    self._debug_state = prev_state
+                    self._pending_prompt = None
+                return messages
+
+        with self._lock:
+            result = self._edited_messages if self._edited_messages is not None else messages
+            self._debug_state = prev_state
+            self._pending_prompt = None
+            return result
+
+    def approve_prompt(
+        self,
+        edited_messages: Sequence[ChatMessage] | None = None,
+    ) -> None:
+        """Release the prompt gate, optionally with edited messages."""
+        with self._lock:
+            if edited_messages is not None:
+                self._edited_messages = list(edited_messages)
+            else:
+                self._edited_messages = None
+        if hasattr(self, "_prompt_approved"):
+            self._prompt_approved.set()
+
+    def skip_interception(self) -> None:
+        """Disable prompt interception for the rest of this run."""
+        with self._lock:
+            self._config = DebugConfig(
+                enabled=self._config.enabled,
+                port=self._config.port,
+                token=self._config.token,
+                intercept_prompts=False,
+                max_checkpoint_history=self._config.max_checkpoint_history,
+            )
+        if hasattr(self, "_prompt_approved"):
+            self._prompt_approved.set()
+
+    def get_pending_prompt(self) -> dict[str, object] | None:
+        """Return the pending prompt payload for ``GET /api/prompt/pending``."""
+        with self._lock:
+            if self._pending_prompt is not None:
+                return dict(self._pending_prompt)
+            return None
+
+
+@runtime_checkable
+class PromptInterceptor(Protocol):
+    """Protocol for intercepting LLM calls in the router."""
+
+    def gate(
+        self,
+        role: str,
+        messages: Sequence[ChatMessage],
+    ) -> Sequence[ChatMessage]: ...

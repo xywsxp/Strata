@@ -16,9 +16,10 @@ from typing import TYPE_CHECKING
 import icontract
 
 from strata.core.config import DebugConfig
-from strata.core.errors import DebugServerError
+from strata.core.errors import DebugRollbackError, DebugServerError
 from strata.core.types import TaskGraph, task_graph_to_dict
 from strata.debug.controller import DebugController
+from strata.debug.rollback import RollbackEngine
 
 if TYPE_CHECKING:
     from strata.env.protocols import IGUIAdapter
@@ -64,12 +65,14 @@ class DebugServer:
         gui: IGUIAdapter | None = None,
         graph_fn: Callable[[], TaskGraph | None] | None = None,
         task_states_fn: Callable[[], Mapping[str, str]] | None = None,
+        rollback_engine: RollbackEngine | None = None,
     ) -> None:
         self._controller = controller
         self._config = config
         self._gui = gui
         self._graph_fn = graph_fn
         self._task_states_fn = task_states_fn
+        self._rollback = rollback_engine
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._runner: aiohttp.web.AppRunner | None = None
@@ -132,6 +135,13 @@ class DebugServer:
         app.router.add_post("/api/step", self._handle_step)
         app.router.add_post("/api/continue", self._handle_continue)
         app.router.add_post("/api/breakpoint", self._handle_breakpoint)
+        app.router.add_get("/api/prompt/pending", self._handle_prompt_pending)
+        app.router.add_post("/api/prompt/approve", self._handle_prompt_approve)
+        app.router.add_post("/api/prompt/skip", self._handle_prompt_skip)
+        app.router.add_post("/api/rollback/task", self._handle_rollback_task)
+        app.router.add_post("/api/rollback/checkpoint", self._handle_rollback_checkpoint)
+        app.router.add_post("/api/rollback/graph", self._handle_rollback_graph)
+        app.router.add_get("/api/rollback/versions", self._handle_rollback_versions)
         self._runner = aiohttp.web.AppRunner(app)
         await self._runner.setup()
         site = aiohttp.web.TCPSite(self._runner, "0.0.0.0", self._config.port)
@@ -227,5 +237,89 @@ class DebugServer:
             {
                 "ok": True,
                 "breakpoints": sorted(self._controller.list_breakpoints()),
+            }
+        )
+
+    # ── prompt interception handlers ──
+
+    async def _handle_prompt_pending(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        pending = self._controller.get_pending_prompt()
+        return aiohttp.web.json_response({"pending": pending})
+
+    async def _handle_prompt_approve(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        self._controller.approve_prompt()
+        return aiohttp.web.json_response({"ok": True})
+
+    async def _handle_prompt_skip(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        self._controller.skip_interception()
+        return aiohttp.web.json_response({"ok": True, "intercept_prompts": False})
+
+    # ── rollback handlers ──
+
+    async def _handle_rollback_task(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        if self._rollback is None:
+            return aiohttp.web.json_response({"error": "rollback not available"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        n = int(body.get("n", 1)) if isinstance(body, dict) else 1
+        try:
+            record = self._rollback.undo_tasks(n)
+        except DebugRollbackError as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
+        return aiohttp.web.json_response(
+            {
+                "ok": True,
+                "undone_task": record.task_id,
+                "checkpoint_version": record.checkpoint_version,
+            }
+        )
+
+    async def _handle_rollback_checkpoint(
+        self, request: aiohttp.web.Request
+    ) -> aiohttp.web.Response:
+        if self._rollback is None:
+            return aiohttp.web.json_response({"error": "rollback not available"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return aiohttp.web.json_response({"error": "invalid JSON"}, status=400)
+        version = body.get("version")
+        if not isinstance(version, int):
+            return aiohttp.web.json_response({"error": "version (int) required"}, status=400)
+        try:
+            cp = self._rollback.rollback_to_checkpoint(version)
+        except DebugRollbackError as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
+        return aiohttp.web.json_response(
+            {
+                "ok": True,
+                "restored_version": version,
+                "global_state": cp.global_state,
+            }
+        )
+
+    async def _handle_rollback_graph(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        if self._rollback is None:
+            return aiohttp.web.json_response({"error": "rollback not available"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        steps = int(body.get("steps", 1)) if isinstance(body, dict) else 1
+        try:
+            graph = self._rollback.rollback_graph(steps)
+        except DebugRollbackError as exc:
+            return aiohttp.web.json_response({"error": str(exc)}, status=400)
+        return aiohttp.web.json_response({"ok": True, "graph_goal": graph.goal})
+
+    async def _handle_rollback_versions(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        if self._rollback is None:
+            return aiohttp.web.json_response({"error": "rollback not available"}, status=503)
+        return aiohttp.web.json_response(
+            {
+                "versions": self._rollback._persistence.list_versions(),
+                "undo_depth": self._rollback.undo_depth,
             }
         )

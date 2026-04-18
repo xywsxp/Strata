@@ -96,3 +96,56 @@ class TestCheckpointSchemaVersion:
         )
         with pytest.raises(PersistenceSchemaVersionError):
             mgr.load_checkpoint()
+
+
+class TestMultiVersionCheckpoints:
+    def _make_cp(self, label: str) -> Checkpoint:
+        return Checkpoint(
+            global_state="EXECUTING",
+            task_states={"t1": "RUNNING"},
+            context={"label": label},
+            task_graph=TaskGraph(goal=label),
+            timestamp=time.time(),
+        )
+
+    def test_versioned_save_and_load(self, tmp_path: Path) -> None:
+        mgr = PersistenceManager(str(tmp_path / "state"), max_checkpoint_history=10)
+        cp1 = self._make_cp("cp1")
+        cp2 = self._make_cp("cp2")
+        mgr.save_checkpoint(cp1)
+        mgr.save_checkpoint(cp2)
+        assert mgr.current_version == 2
+        loaded_v1 = mgr.load_checkpoint(version=1)
+        loaded_v2 = mgr.load_checkpoint(version=2)
+        assert loaded_v1 is not None
+        assert loaded_v2 is not None
+        assert loaded_v1.context["label"] == "cp1"
+        assert loaded_v2.context["label"] == "cp2"
+
+    def test_gc_respects_max_history(self, tmp_path: Path) -> None:
+        mgr = PersistenceManager(str(tmp_path / "state"), max_checkpoint_history=3)
+        for i in range(5):
+            mgr.save_checkpoint(self._make_cp(f"cp{i}"))
+        versions = mgr.list_versions()
+        assert len(versions) == 3
+        assert versions[0] == 3
+
+    def test_list_versions_empty(self, tmp_path: Path) -> None:
+        mgr = PersistenceManager(str(tmp_path / "state"), max_checkpoint_history=5)
+        assert mgr.list_versions() == []
+
+    def test_clear_removes_versioned(self, tmp_path: Path) -> None:
+        mgr = PersistenceManager(str(tmp_path / "state"), max_checkpoint_history=5)
+        mgr.save_checkpoint(self._make_cp("cp1"))
+        mgr.save_checkpoint(self._make_cp("cp2"))
+        mgr.clear_checkpoint()
+        assert mgr.list_versions() == []
+        assert mgr.load_checkpoint() is None
+        assert mgr.current_version == 0
+
+    def test_single_history_no_versioned_files(self, tmp_path: Path) -> None:
+        """max_checkpoint_history=1 behaves like the old single-checkpoint mode."""
+        mgr = PersistenceManager(str(tmp_path / "state"), max_checkpoint_history=1)
+        mgr.save_checkpoint(self._make_cp("only"))
+        assert mgr.list_versions() == []
+        assert mgr.load_checkpoint() is not None

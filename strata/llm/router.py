@@ -12,6 +12,7 @@ are persisted for offline debugging.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import icontract
 
@@ -20,6 +21,9 @@ from strata.core.errors import ConfigError
 from strata.core.types import LLMRole
 from strata.llm.provider import ChatMessage, ChatResponse, LLMProvider, OpenAICompatProvider
 from strata.observability.transcript import ChatTranscriptSink, NullTranscriptSink
+
+if TYPE_CHECKING:
+    from strata.debug.controller import PromptInterceptor
 
 
 class LLMRouter:
@@ -36,10 +40,12 @@ class LLMRouter:
         self,
         config: StrataConfig,
         sink: ChatTranscriptSink | None = None,
+        prompt_interceptor: PromptInterceptor | None = None,
     ) -> None:
         self._config = config
         self._cache: dict[str, OpenAICompatProvider] = {}
         self._sink: ChatTranscriptSink = sink if sink is not None else NullTranscriptSink()
+        self._prompt_interceptor = prompt_interceptor
 
         for role_name in ("planner", "grounding", "vision", "search"):
             provider_name: str = getattr(config.roles, role_name)
@@ -69,6 +75,8 @@ class LLMRouter:
         json_mode: bool = False,
     ) -> ChatResponse:
         """Central dispatch: call provider, record to sink, re-raise on error."""
+        if self._prompt_interceptor is not None:
+            messages = self._prompt_interceptor.gate(role, messages)
         provider = self.get_provider(role)
         try:
             response = provider.chat(

@@ -148,28 +148,71 @@ def _checkpoint_from_dict(d: Mapping[str, object]) -> Checkpoint:
 
 
 class PersistenceManager:
-    """Save and load execution checkpoints."""
+    """Save and load execution checkpoints with optional multi-version history."""
 
-    def __init__(self, state_dir: str) -> None:
+    def __init__(
+        self,
+        state_dir: str,
+        max_checkpoint_history: int = 1,
+    ) -> None:
         self._state_dir = state_dir
+        self._max_history = max(1, max_checkpoint_history)
+        self._version = 0
         Path(state_dir).mkdir(parents=True, exist_ok=True)
 
     @property
     def _checkpoint_path(self) -> str:
         return os.path.join(self._state_dir, "checkpoint.json")
 
+    def _versioned_path(self, version: int) -> str:
+        return os.path.join(self._state_dir, f"checkpoint_v{version}.json")
+
+    @property
+    def current_version(self) -> int:
+        return self._version
+
     def save_checkpoint(self, checkpoint: Checkpoint) -> None:
         data = json.dumps(_checkpoint_to_dict(checkpoint), ensure_ascii=False)
-        atomic_write(self._checkpoint_path, data.encode("utf-8"))
+        encoded = data.encode("utf-8")
+        atomic_write(self._checkpoint_path, encoded)
+        self._version += 1
+        if self._max_history > 1:
+            atomic_write(self._versioned_path(self._version), encoded)
+            self._gc_old_versions()
 
-    def load_checkpoint(self) -> Checkpoint | None:
-        path = self._checkpoint_path
+    def load_checkpoint(self, version: int | None = None) -> Checkpoint | None:
+        path = self._versioned_path(version) if version is not None else self._checkpoint_path
         if not os.path.exists(path):
             return None
         raw = Path(path).read_text(encoding="utf-8")
         return _checkpoint_from_dict(json.loads(raw))
 
+    def list_versions(self) -> list[int]:
+        """Return sorted list of available checkpoint version numbers."""
+        versions: list[int] = []
+        for f in Path(self._state_dir).glob("checkpoint_v*.json"):
+            stem = f.stem
+            try:
+                v = int(stem.split("_v")[1])
+                versions.append(v)
+            except (IndexError, ValueError):
+                continue
+        return sorted(versions)
+
     def clear_checkpoint(self) -> None:
         path = self._checkpoint_path
         if os.path.exists(path):
             os.unlink(path)
+        for f in Path(self._state_dir).glob("checkpoint_v*.json"):
+            with contextlib.suppress(FileNotFoundError):
+                f.unlink()
+        self._version = 0
+
+    def _gc_old_versions(self) -> None:
+        """Remove versions exceeding ``max_checkpoint_history``."""
+        versions = self.list_versions()
+        while len(versions) > self._max_history:
+            oldest = versions.pop(0)
+            p = self._versioned_path(oldest)
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(p)

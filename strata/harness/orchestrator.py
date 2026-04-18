@@ -46,6 +46,7 @@ from strata.grounding.vision_locator import VisionLocator
 from strata.harness.actions import ACTION_VOCABULARY, format_action_catalog_for_llm
 from strata.harness.context import AuditLogger, ContextManager
 from strata.harness.executor import PrimitiveTaskExecutor
+from strata.harness.graph_tracker import GraphTracker, NullGraphTracker
 from strata.harness.gui_lock import GUILock
 from strata.harness.persistence import Checkpoint, PersistenceManager
 from strata.harness.recovery import RecoveryAction, RecoveryLevel, RecoveryPipeline
@@ -130,15 +131,39 @@ class AgentOrchestrator:
         self._layout = layout
         self._transcript_sink = transcript_sink
         self._recorder = recorder
+
+        # CONVENTION: debug 组件条件构造——enabled=false 时不 import aiohttp，
+        # _debug_controller=None 使 _fire/await_step 短路为零开销。
+        # 构造顺序：debug controller → LLMRouter（注入 interceptor）→ 其余。
+        if config.debug.enabled:
+            from strata.debug.controller import DebugController
+            from strata.debug.server import DebugServer
+
+            self._debug_controller: DebugController | None = DebugController(
+                config.debug,
+                interrupt_check=lambda: self._ui.interrupted,
+            )
+        else:
+            self._debug_controller = None
+
         # CONVENTION: llm_router 可选注入 —— 生产路径由 __main__ 构造一次；
         # 测试可传 mock 免去 OpenAI 客户端构造的网络依赖。
         self._llm_router = (
-            llm_router if llm_router is not None else LLMRouter(config, sink=transcript_sink)
+            llm_router
+            if llm_router is not None
+            else LLMRouter(
+                config,
+                sink=transcript_sink,
+                prompt_interceptor=self._debug_controller,
+            )
         )
         self._context = ContextManager(config.memory)
         state_dir = _default_state_dir()
         self._audit_logger = AuditLogger(config.audit_log)
-        self._persistence = PersistenceManager(state_dir)
+        self._persistence = PersistenceManager(
+            state_dir,
+            max_checkpoint_history=config.debug.max_checkpoint_history,
+        )
         # CONVENTION: 生产路径下所有 grounding 组件由 Orchestrator 构造并注入
         # PrimitiveTaskExecutor；测试可直接传 executor 绕过构造链。
         if executor is None:
@@ -160,22 +185,16 @@ class AgentOrchestrator:
         self._recovery = RecoveryPipeline(config, self._adjuster)
         self._state_machine: StateMachine[GlobalState, GlobalEvent]
         self._last_graph: TaskGraph | None = None
+        self._graph_tracker: GraphTracker = NullGraphTracker()
         self._attempt_counts: dict[str, int] = {}
         self._task_states: dict[str, TaskState] = {}
         self._current_goal: str = ""
 
-        # CONVENTION: debug 组件条件构造——enabled=false 时不 import aiohttp，
-        # _debug_controller=None 使 _fire/await_step 短路为零开销。
         if config.debug.enabled:
-            from strata.debug.controller import DebugController
             from strata.debug.server import DebugServer
 
-            self._debug_controller: DebugController | None = DebugController(
-                config.debug,
-                interrupt_check=lambda: self._ui.interrupted,
-            )
             self._debug_server: DebugServer | None = DebugServer(
-                controller=self._debug_controller,
+                controller=self._debug_controller,  # type: ignore[arg-type]
                 config=config.debug,
                 gui=bundle.gui,
                 graph_fn=lambda: self._last_graph,
@@ -183,7 +202,6 @@ class AgentOrchestrator:
             )
             self._debug_server.start()
         else:
-            self._debug_controller = None
             self._debug_server = None
 
     @icontract.require(
@@ -228,6 +246,7 @@ class AgentOrchestrator:
                 self._fire("receive_goal")
                 graph = self._plan(goal)
                 self._last_graph = graph
+                self._graph_tracker.update(graph, "initial_plan")
                 self._task_states = {t.id: "PENDING" for t in graph.tasks}
                 self._save_checkpoint()
                 self._fire("plan_ready")
@@ -606,6 +625,7 @@ class AgentOrchestrator:
             return idx
 
         self._last_graph = new_graph
+        self._graph_tracker.update(new_graph, f"replan_{task.id}")
         tasks[:] = list(new_graph.tasks)
         del task_states[task.id]
         for node in new_graph.tasks:
@@ -705,6 +725,7 @@ class AgentOrchestrator:
         # Restore the saved state and jump straight into SCHEDULING.
         self._fire("receive_goal")
         self._last_graph = cp.task_graph
+        self._graph_tracker.update(cp.task_graph, "resumed_from_checkpoint")
         self._task_states = dict(cp.task_states)
         self._current_goal = saved_goal
         self._fire("plan_ready")
