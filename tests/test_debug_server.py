@@ -215,3 +215,36 @@ class TestHTTPEndpoints:
                 assert msg["event"] == "task_dispatched"
 
         asyncio.run(_check())
+
+
+class TestPanelHTML:
+    """Static assertions on the served panel.html content."""
+
+    def test_panel_html_no_orphan_css(self) -> None:
+        """Confirm orphan CSS classes were removed in Step 10.1."""
+        import importlib.resources
+
+        html = importlib.resources.read_text("strata.debug", "panel.html")
+        for orphan in (".llm-msg-block", ".llm-modal", ".llm-msg-role", ".llm-msg-content"):
+            assert orphan not in html, f"orphan CSS {orphan} still present"
+
+    def test_panel_html_vis_network_ref(self) -> None:
+        """vis-network CDN reference must still exist."""
+        import importlib.resources
+
+        html = importlib.resources.read_text("strata.debug", "panel.html")
+        assert "vis-network" in html
+
+    def test_panel_html_no_transcript_modal(self) -> None:
+        """Confirm llm-transcript-modal was removed in Step 10.2."""
+        import importlib.resources
+
+        html = importlib.resources.read_text("strata.debug", "panel.html")
+        assert "llm-transcript-modal" not in html
+
+    def test_panel_html_valid(self) -> None:
+        """Confirm script tags are balanced."""
+        import importlib.resources
+
+        html = importlib.resources.read_text("strata.debug", "panel.html")
+        assert html.count("<script") == html.count("</script>")

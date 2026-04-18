@@ -121,6 +121,27 @@ class TestContextManagerWindow:
             assert "window" in content
             assert "facts" in content
 
+    def test_compress_trims_window(self) -> None:
+        """compress() must halve the sliding window after snapshotting."""
+        cm = ContextManager(MemoryConfig(sliding_window_size=20, max_facts_in_slot=20))
+        for i in range(10):
+            cm.add_entry({"step": i})
+        assert len(cm.get_window()) == 10
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cm.compress(snapshot_dir=tmpdir)
+        after = cm.get_window()
+        assert len(after) == 5, "compress should keep half the entries"
+        # Recent entries are retained.
+        assert after[-1]["step"] == 9
+
+    def test_compress_retains_at_least_one_entry(self) -> None:
+        """compress() never empties the window entirely."""
+        cm = ContextManager(MemoryConfig(sliding_window_size=5, max_facts_in_slot=20))
+        cm.add_entry({"step": 0})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cm.compress(snapshot_dir=tmpdir)
+        assert len(cm.get_window()) == 1
+
     def test_clear(self) -> None:
         cm = ContextManager(MemoryConfig(sliding_window_size=5, max_facts_in_slot=20))
         cm.add_entry({"action": "test"})

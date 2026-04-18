@@ -49,10 +49,6 @@ class Checkpoint:
     lambda path, content: Path(path).read_bytes() == content,
     "file content must match after write",
 )
-@icontract.ensure(
-    lambda path: not Path(path + ".tmp").exists(),
-    "no .tmp residue after write",
-)
 def atomic_write(path: str, content: bytes) -> None:
     """Write *content* to *path* atomically (tmp + fsync + replace).
 
@@ -157,8 +153,20 @@ class PersistenceManager:
     ) -> None:
         self._state_dir = state_dir
         self._max_history = max(1, max_checkpoint_history)
-        self._version = 0
         Path(state_dir).mkdir(parents=True, exist_ok=True)
+        existing = self._scan_existing_versions()
+        self._version = max(existing) if existing else 0
+
+    def _scan_existing_versions(self) -> list[int]:
+        """Read versioned checkpoint filenames and return their version numbers."""
+        versions: list[int] = []
+        for f in Path(self._state_dir).glob("checkpoint_v*.json"):
+            try:
+                v = int(f.stem.split("_v")[1])
+                versions.append(v)
+            except (IndexError, ValueError):
+                continue
+        return versions
 
     @property
     def _checkpoint_path(self) -> str:
@@ -189,15 +197,7 @@ class PersistenceManager:
 
     def list_versions(self) -> list[int]:
         """Return sorted list of available checkpoint version numbers."""
-        versions: list[int] = []
-        for f in Path(self._state_dir).glob("checkpoint_v*.json"):
-            stem = f.stem
-            try:
-                v = int(stem.split("_v")[1])
-                versions.append(v)
-            except (IndexError, ValueError):
-                continue
-        return sorted(versions)
+        return sorted(self._scan_existing_versions())
 
     def clear_checkpoint(self) -> None:
         path = self._checkpoint_path

@@ -210,8 +210,10 @@ class CLI:
         return "abort"
 
     def _handle_sigint(self, signum: int, frame: types.FrameType | None) -> None:
+        if self._interrupted:
+            raise KeyboardInterrupt
         self._interrupted = True
-        self._print("\n[Strata] Interrupt received. Finishing current task...")
+        self._print("\n[Strata] Interrupt received. Press Ctrl+C again to force quit.")
 
     def _print(self, msg: str) -> None:
         print(msg, flush=True)

@@ -117,13 +117,18 @@ class GraphTracker:
 
 
 class NullGraphTracker(GraphTracker):
-    """No-op tracker — all writes are silently dropped."""
+    """In-memory-only tracker — version/history kept in RAM, disk I/O silently skipped.
+
+    Used when no ``run_dir`` is available (tests, headless debug runs).
+    ``update`` and ``history`` work identically to ``GraphTracker``; only
+    ``export_snapshot`` is suppressed so no files are written.
+    """
 
     def __init__(self) -> None:
         super().__init__(run_dir=None)
 
     def update(self, new_graph: TaskGraph, reason: str) -> None:
-        """Track version/history in memory but skip disk I/O."""
+        """Track version/history in memory; skip disk I/O."""
         self._version += 1
         self._current = new_graph
         self._history.append((new_graph, reason, time.time()))

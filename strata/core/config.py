@@ -96,7 +96,7 @@ class DebugConfig:
     enabled: bool
     port: int
     token: str
-    intercept_prompts: bool = False
+    intercept_prompts: bool = True
     max_checkpoint_history: int = 50
 
 
@@ -247,7 +247,7 @@ def _parse_debug(raw: object) -> DebugConfig:
     enabled = bool(section.get("enabled", False))
     port = int(section.get("port", 0))
     token = str(section.get("token", ""))
-    intercept_prompts = bool(section.get("intercept_prompts", False))
+    intercept_prompts = bool(section.get("intercept_prompts", True))
     max_checkpoint_history = int(section.get("max_checkpoint_history", 50))
     if enabled:
         if port < 1024 or port > 65535:

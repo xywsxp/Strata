@@ -43,6 +43,16 @@ class RecoveryPipeline:
         self._config = config
         self._adjuster = adjuster
 
+    # CONVENTION: Recovery thresholds are hardcoded rather than read from
+    # StrataConfig — StrataConfig has no recovery-specific section yet.
+    # Thresholds: ≤1 → RETRY, 2 → ALTERNATIVE, 3 → REPLAN, 4 → SKIP, ≥5 → USER.
+    # attempt_count=0 means first failure (before any retry), so 0 and 1 both
+    # map to RETRY giving exactly one retry attempt before escalating.
+    _RETRY_THRESHOLD: int = 1
+    _ALTERNATIVE_THRESHOLD: int = 2
+    _REPLAN_THRESHOLD: int = 3
+    _SKIP_THRESHOLD: int = 4
+
     @icontract.require(lambda attempt_count: attempt_count >= 0, "attempt_count must be >= 0")
     def attempt_recovery(
         self,
@@ -51,22 +61,22 @@ class RecoveryPipeline:
         attempt_count: int,
     ) -> RecoveryAction:
         """Determine recovery action based on attempt count (monotonically escalating)."""
-        if attempt_count <= 1:
+        if attempt_count <= self._RETRY_THRESHOLD:
             return RecoveryAction(
                 level=RecoveryLevel.RETRY,
                 description=f"retry task {failed_task.id} (attempt {attempt_count})",
             )
 
-        if attempt_count == 2:
+        if attempt_count == self._ALTERNATIVE_THRESHOLD:
             return RecoveryAction(
                 level=RecoveryLevel.ALTERNATIVE,
                 description=f"try alternative for {failed_task.id}",
             )
 
-        if attempt_count == 3:
+        if attempt_count == self._REPLAN_THRESHOLD:
             return self._try_replan(failed_task, error)
 
-        if attempt_count == 4:
+        if attempt_count == self._SKIP_THRESHOLD:
             return RecoveryAction(
                 level=RecoveryLevel.SKIP,
                 description=f"skip task {failed_task.id}",

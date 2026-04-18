@@ -731,3 +731,96 @@ class TestUIInteractions:
         result = orch.run_goal("list files")
 
         assert result.final_state == "FAILED"
+
+
+# ── Phase 11 fixes: push_undo, request_cancel ──
+
+
+class TestPushUndo:
+    """Undo stack must be populated by _execute after each successful task."""
+
+    def test_undo_stack_populated_on_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        graph = _single_task_graph()
+        _stub_decompose_goal(monkeypatch, graph)
+
+        # Give the orchestrator a rollback engine by enabling debug (with a real
+        # debug config) — but we don't actually start the server; we inject
+        # _rollback_engine directly after construction via a null engine.
+        from strata.debug.rollback import RollbackEngine
+        from strata.harness.graph_tracker import NullGraphTracker
+
+        orch = _make_orchestrator(executor=_FixedGraphExecutor())
+        # Inject a real rollback engine (no server).
+        orch._rollback_engine = RollbackEngine(orch._persistence, NullGraphTracker())
+
+        result = orch.run_goal("list files")
+        assert result.final_state == "COMPLETED"
+        assert orch._rollback_engine.undo_depth > 0, "push_undo must be called on success"
+
+    def test_undo_stack_empty_when_no_task_succeeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Skipped/failed tasks must not push undo records."""
+        graph = _single_task_graph()
+        _stub_decompose_goal(monkeypatch, graph)
+
+        from strata.debug.rollback import RollbackEngine
+        from strata.harness.graph_tracker import NullGraphTracker
+
+        orch = _make_orchestrator(executor=_FailingExecutor(n_failures=99))
+        orch._rollback_engine = RollbackEngine(orch._persistence, NullGraphTracker())
+
+        orch.run_goal("list files")
+        # No task reached result.success, so the undo stack must be empty.
+        assert orch._rollback_engine.undo_depth == 0
+
+
+class TestCooperativeCancel:
+    """request_cancel() causes the execute loop to exit at the next task boundary."""
+
+    def test_cancel_before_run_goal_has_no_effect(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        graph = _single_task_graph()
+        _stub_decompose_goal(monkeypatch, graph)
+
+        orch = _make_orchestrator(executor=_FixedGraphExecutor())
+        # Cancel before the run — should be cleared by run_goal reset.
+        orch.request_cancel()
+        result = orch.run_goal("list files")
+        # After reset the cancel flag is cleared, so the run should succeed.
+        assert result.final_state == "COMPLETED"
+
+    def test_cancel_mid_run_aborts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Injecting cancel_requested mid-run causes FAILED result."""
+        graph = TaskGraph(
+            goal="multi task",
+            tasks=(
+                TaskNode(
+                    id="t1", task_type="primitive", action="list_directory", params={"path": "/"}
+                ),
+                TaskNode(
+                    id="t2",
+                    task_type="primitive",
+                    action="list_directory",
+                    params={"path": "/"},
+                    depends_on=("t1",),
+                ),
+            ),
+        )
+        _stub_decompose_goal(monkeypatch, graph)
+
+        class _CancelAfterFirstExecutor:
+            def __init__(self, orch_ref: list[AgentOrchestrator]) -> None:
+                self._orch_ref = orch_ref
+                self._count = 0
+
+            def execute(self, task: TaskNode, context: Mapping[str, object]) -> ActionResult:
+                self._count += 1
+                if self._count == 1:
+                    self._orch_ref[0].request_cancel()
+                return ActionResult(success=True)
+
+        orch_box: list[AgentOrchestrator] = []
+        executor = _CancelAfterFirstExecutor(orch_box)
+        orch = _make_orchestrator(executor=executor)
+        orch_box.append(orch)
+
+        result = orch.run_goal("multi task")
+        assert result.final_state == "FAILED"

@@ -281,3 +281,85 @@ def test_skip_interception_unblocks_gate() -> None:
     ctrl.skip_interception()
     assert released.wait(timeout=2.0)
     t.join(timeout=2.0)
+
+
+# ── New tests for Phase 10/11/12 fixes ──
+
+
+def test_gate_rejects_empty_messages() -> None:
+    """gate() contract requires at least one message."""
+    import icontract
+
+    cfg = DebugConfig(enabled=True, port=8390, token="t", intercept_prompts=True)
+    ctrl = DebugController(cfg)
+    with pytest.raises(icontract.ViolationError, match="non-empty"):
+        ctrl.gate("planner", [])
+
+
+def test_record_llm_done_no_ghost_event_on_missing_seq() -> None:
+    """record_llm_done for unknown role should not enqueue a ghost llm_done event."""
+    from strata.llm.provider import ChatMessage
+
+    cfg = DebugConfig(enabled=True, port=8390, token="t")
+    ctrl = DebugController(cfg)
+    msgs = [ChatMessage(role="user", content="hi")]
+    # No pending entry for "unknown_role" → seq will be 0, no event emitted.
+    ctrl.record_llm_done("unknown_role", 50.0, msgs, "response")
+    events = [e for e in ctrl.drain_events() if e.event == "llm_done"]
+    assert not events, "no llm_done event expected for missing seq"
+
+
+def test_record_llm_error_no_ghost_event_on_missing_seq() -> None:
+    """record_llm_error for unknown role should not enqueue a ghost llm_error event."""
+    from strata.llm.provider import ChatMessage
+
+    cfg = DebugConfig(enabled=True, port=8390, token="t")
+    ctrl = DebugController(cfg)
+    msgs = [ChatMessage(role="user", content="hi")]
+    ctrl.record_llm_error("unknown_role", 50.0, msgs, RuntimeError("boom"))
+    events = [e for e in ctrl.drain_events() if e.event == "llm_error"]
+    assert not events, "no llm_error event expected for missing seq"
+
+
+def test_record_llm_done_emits_event_for_known_seq() -> None:
+    """record_llm_done emits llm_done only when the seq is in pending."""
+    from strata.llm.provider import ChatMessage
+
+    cfg = DebugConfig(enabled=True, port=8390, token="t", intercept_prompts=False)
+    ctrl = DebugController(cfg)
+    msgs = [ChatMessage(role="user", content="hi")]
+    # gate() (even without blocking) registers the seq in _llm_pending.
+    ctrl.gate("planner", msgs)
+    ctrl.drain_events()  # clear llm_call event
+    ctrl.record_llm_done("planner", 100.0, msgs, "ok")
+    events = [e for e in ctrl.drain_events() if e.event == "llm_done"]
+    assert len(events) == 1
+    assert "seq=1" in events[0].detail
+
+
+def test_skip_interception_uses_replace() -> None:
+    """skip_interception preserves all other config fields via dataclasses.replace."""
+    cfg = DebugConfig(
+        enabled=True, port=9000, token="mytoken", intercept_prompts=True, max_checkpoint_history=5
+    )
+    ctrl = DebugController(cfg)
+    ctrl.skip_interception()
+    snap = ctrl.get_state_snapshot()
+    assert snap["intercept_prompts"] is False
+    # Other fields preserved — re-enable to verify roundtrip.
+    ctrl.enable_interception()
+    snap2 = ctrl.get_state_snapshot()
+    assert snap2["intercept_prompts"] is True
+
+
+def test_debug_state_literal_no_rolling_back() -> None:
+    """ROLLING_BACK is removed from the DebugState Literal."""
+    from strata.debug.controller import DebugState
+
+    # If ROLLING_BACK were still in the union, this isinstance check (via
+    # get_args) would expose it.  Simply instantiate and verify state is
+    # one of the four expected values.
+    cfg = DebugConfig(enabled=True, port=8390, token="t")
+    ctrl = DebugController(cfg)
+    state: DebugState = ctrl.debug_state
+    assert state in {"INACTIVE", "OBSERVING", "PAUSED", "EDITING_PROMPT"}

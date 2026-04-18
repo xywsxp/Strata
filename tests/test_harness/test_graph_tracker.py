@@ -87,3 +87,23 @@ class TestNullGraphTracker:
         tracker.update(_simple_graph(), "test")
         assert tracker.version() == 1
         assert tracker.current() is not None
+
+    def test_history_retained_in_memory(self) -> None:
+        """NullGraphTracker keeps history in memory (B4 — behaviour matches docs)."""
+        tracker = NullGraphTracker()
+        g1 = _simple_graph("g1")
+        g2 = _simple_graph("g2")
+        tracker.update(g1, "initial")
+        tracker.update(g2, "replan")
+        hist = tracker.history()
+        assert len(hist) == 2
+        assert hist[0][0].goal == "g1"
+        assert hist[1][0].goal == "g2"
+
+    def test_export_snapshot_no_op(self) -> None:
+        """export_snapshot on NullGraphTracker does not raise and writes nothing."""
+        tracker = NullGraphTracker()
+        tracker.update(_simple_graph(), "test")
+        # Should not raise.
+        tracker.export_snapshot({"t1": "RUNNING"})
+        # No run_dir so nothing to check on disk — just ensure no exception.

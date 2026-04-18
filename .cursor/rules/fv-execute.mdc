@@ -12,7 +12,9 @@ alwaysApply: false
 对每个 Step：
 
 1. **Write**：按计划传入上下文（`__init__.py` + 领域模型 + 待改文件 + `tests/strategies.py`）+ 所有历次 Review 失败反馈，执行 `fv-writer` 规则。
+   **[强制接线协议 (Wiring Protocol)]**：严禁产出“孤岛代码”(Orphan Code)。所有新增或修改的函数/类/模块，必须在当前 Step 内完成上下游的物理接入。这包括：在 `__init__.py` 中显式导出、注册到对应工厂/DI 容器、配置路由、并在实际调用链路中实例化。只造轮子不装车、没有建立 DAG (有向无环图) 连通性的代码修改，均视为未完成任务。
 2. **Review**：传入变更文件 + `__init__.py` + 领域模型 + `tests/strategies.py`，执行 `fv-reviewer` 规则。
+   **[连通性审查 (Topology Check)]**：Reviewer 必须执行严格的 AST/调用图脑内推演。若发现新增实体是“死代码”(Dead Code) 或未被上层逻辑消费，必须立即判定为 FAIL，并直接指出缺失的接线点（例如：“未在主流程入口引入”或“缺少路由注册”）。
 3. Reviewer 输出 `LGTM` → 进入下一 Step。
 4. Reviewer 输出 FAIL → 累积反馈，Writer 重试（上限 3 次）。
 5. 3 次仍失败 → **熔断**：停止，输出失败历史摘要，提示人类介入（建议 `git diff` 查看脏状态，必要时 `git checkout -- .` 回滚）。

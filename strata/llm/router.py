@@ -11,6 +11,7 @@ are persisted for offline debugging.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -78,6 +79,7 @@ class LLMRouter:
         if self._prompt_interceptor is not None:
             messages = self._prompt_interceptor.gate(role, messages)
         provider = self.get_provider(role)
+        t0 = time.perf_counter()
         try:
             response = provider.chat(
                 messages,
@@ -86,8 +88,18 @@ class LLMRouter:
                 json_mode=json_mode,
             )
         except Exception as exc:
+            dur_ms = (time.perf_counter() - t0) * 1000
+            if self._prompt_interceptor is not None and hasattr(
+                self._prompt_interceptor, "record_llm_error"
+            ):
+                self._prompt_interceptor.record_llm_error(role, dur_ms, messages, exc)
             self._sink.record(role, messages, None, exc)
             raise
+        dur_ms = (time.perf_counter() - t0) * 1000
+        if self._prompt_interceptor is not None and hasattr(
+            self._prompt_interceptor, "record_llm_done"
+        ):
+            self._prompt_interceptor.record_llm_done(role, dur_ms, messages, response)
         self._sink.record(role, messages, response, None)
         return response
 

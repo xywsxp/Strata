@@ -119,3 +119,24 @@ class TestGraphRollback:
 
         with pytest.raises(DebugRollbackError, match="only 1 versions"):
             engine.rollback_graph(1)
+
+
+class TestListCheckpointVersions:
+    """Tests for the new public list_checkpoint_versions() method."""
+
+    def test_delegates_to_persistence(self, tmp_path: Path) -> None:
+        mgr = PersistenceManager(str(tmp_path / "s"), max_checkpoint_history=10)
+        gt = GraphTracker()
+        engine = RollbackEngine(mgr, gt)
+
+        mgr.save_checkpoint(_make_cp("v1"))
+        mgr.save_checkpoint(_make_cp("v2"))
+
+        versions = engine.list_checkpoint_versions()
+        assert versions == [1, 2]
+
+    def test_empty_when_no_versions(self, tmp_path: Path) -> None:
+        mgr = PersistenceManager(str(tmp_path / "s"))
+        gt = GraphTracker()
+        engine = RollbackEngine(mgr, gt)
+        assert engine.list_checkpoint_versions() == []

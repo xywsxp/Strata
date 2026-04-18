@@ -100,9 +100,12 @@ class ContextManager:
         return list(self._window)
 
     def compress(self, snapshot_dir: str | None = None) -> None:
-        """Save a snapshot of current context and trim old entries.
+        """Save a snapshot of current context, then trim the sliding window.
 
-        Uses atomic write via the persistence module for safety.
+        The snapshot is written atomically before trimming so that context
+        is never lost even if the process crashes mid-compression.
+        Half of the window entries are retained (keeping recent context)
+        while the oldest half is discarded to free memory.
         """
         if snapshot_dir is None:
             snapshot_dir = str(Path.home() / ".strata" / "context_snapshots")
@@ -123,6 +126,10 @@ class ContextManager:
             ensure_ascii=False,
         )
         atomic_write(snapshot_path, snapshot_data.encode("utf-8"))
+        keep = max(1, len(self._window) // 2)
+        recent = list(self._window)[-keep:]
+        self._window.clear()
+        self._window.extend(recent)
 
     def clear(self) -> None:
         self._memory.clear()

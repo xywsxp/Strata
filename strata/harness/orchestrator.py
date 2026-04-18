@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -92,6 +93,37 @@ class AgentUI(Protocol):
     def handle_error(self, task_id: str, error: Exception) -> Literal["retry", "skip", "abort"]: ...
 
     def handle_destructive(self, description: str) -> bool: ...
+
+
+class HeadlessUI:
+    """Non-interactive UI for debug-server-initiated goals.
+
+    Auto-confirms all prompts, never resumes from checkpoint (always fresh),
+    and relays progress to stdout for server-side logging.
+    """
+
+    @property
+    def interrupted(self) -> bool:
+        return False
+
+    def display_plan(self, graph: TaskGraph) -> None:
+        print(f"[Debug] Plan: {graph.goal} ({len(graph.tasks)} tasks)", flush=True)
+
+    def confirm_plan(self) -> bool:
+        return True
+
+    def confirm_resume(self, saved_goal: str, task_count: int) -> bool:
+        return False
+
+    def display_progress(self, task_id: str, state: TaskState) -> None:
+        print(f"  [debug] {task_id}: {state}", flush=True)
+
+    def handle_error(self, task_id: str, error: Exception) -> Literal["retry", "skip", "abort"]:
+        print(f"  [debug] {task_id} failed: {error} — auto-skipping", flush=True)
+        return "skip"
+
+    def handle_destructive(self, description: str) -> bool:
+        return True
 
 
 @dataclass(frozen=True)
@@ -189,16 +221,31 @@ class AgentOrchestrator:
         self._attempt_counts: dict[str, int] = {}
         self._task_states: dict[str, TaskState] = {}
         self._current_goal: str = ""
+        self._cancel_requested = threading.Event()
+        self._ui_lock = threading.Lock()
+        self._rollback_engine: RollbackEngine | None = None
 
         if config.debug.enabled:
+            import os as _os
+
+            from strata.debug.rollback import RollbackEngine
             from strata.debug.server import DebugServer
 
+            _task_dir = _os.path.join(
+                _os.path.dirname(_os.path.dirname(_os.path.dirname(__file__))), "tasks"
+            )
+            self._rollback_engine = RollbackEngine(self._persistence, self._graph_tracker)
             self._debug_server: DebugServer | None = DebugServer(
                 controller=self._debug_controller,  # type: ignore[arg-type]
                 config=config.debug,
                 gui=bundle.gui,
                 graph_fn=lambda: self._last_graph,
                 task_states_fn=lambda: dict(self._task_states),
+                rollback_engine=self._rollback_engine,
+                task_dir=_task_dir if _os.path.isdir(_task_dir) else None,
+                goal_fn=self._run_goal_background,
+                cancel_fn=self.request_cancel,
+                restore_fn=self.restore_from_checkpoint,
             )
             self._debug_server.start()
         else:
@@ -229,6 +276,7 @@ class AgentOrchestrator:
         self._attempt_counts = {}
         self._task_states = {}
         self._current_goal = goal
+        self._cancel_requested.clear()
         self._context.clear()
         task_states: dict[str, TaskState] = {}
 
@@ -430,7 +478,7 @@ class AgentOrchestrator:
 
         idx = 0
         while idx < len(tasks):
-            if self._ui.interrupted:
+            if self._ui.interrupted or self._cancel_requested.is_set():
                 self._transition_to_failed_via_waiting()
                 raise _OrchestratorAbort(
                     error=OrchestrationError("interrupted by user"),
@@ -440,6 +488,14 @@ class AgentOrchestrator:
             task = tasks[idx]
             self._fire("task_dispatched")
             task_states[task.id] = "RUNNING"
+            self._task_states = dict(task_states)
+            if self._debug_controller is not None:
+                self._debug_controller.notify(
+                    "task_running",
+                    self._state_machine.state,
+                    dict(self._task_states),
+                    task_id=task.id,
+                )
             self._ui.display_progress(task.id, "RUNNING")
             if self._debug_controller is not None:
                 self._debug_controller.await_step(task.id)
@@ -456,6 +512,8 @@ class AgentOrchestrator:
                 self._active_recorder.note_keyframe(f"{task.id}_after")
 
             if result.success:
+                if self._rollback_engine is not None:
+                    self._rollback_engine.push_undo(task.id, dict(task_states))
                 task_states[task.id] = "SUCCEEDED"
                 self._task_states = dict(task_states)
                 self._ui.display_progress(task.id, "SUCCEEDED")
@@ -745,6 +803,42 @@ class AgentOrchestrator:
         self._fire("task_failed")
         self._fire("unrecoverable")
 
+    # ── debug helpers ──
+
+    def _run_goal_background(self, goal: str) -> None:
+        """Run *goal* synchronously (called from debug server's thread pool executor).
+
+        Swaps in a :class:`HeadlessUI` for the duration so that no ``input()``
+        calls block the server thread — all confirmations auto-approve and
+        checkpoint resume is always declined (fresh run).
+        """
+        with self._ui_lock:
+            saved_ui = self._ui
+            self._ui = HeadlessUI()
+        try:
+            self.run_goal(goal)
+        finally:
+            with self._ui_lock:
+                self._ui = saved_ui
+
+    def request_cancel(self) -> None:
+        """Signal cooperative cancellation for the current goal."""
+        self._cancel_requested.set()
+        if self._debug_controller is not None:
+            self._debug_controller.continue_execution()
+
+    def restore_from_checkpoint(self, cp: Checkpoint) -> None:
+        """Synchronize in-memory state from a restored checkpoint.
+
+        Called by rollback handlers so that ``_task_states``,
+        ``_last_graph``, and the state machine reflect the rolled-back
+        position.
+        """
+        self._task_states = dict(cp.task_states)
+        self._last_graph = cp.task_graph
+        self._graph_tracker.update(cp.task_graph, "rollback_restore")
+        self._current_goal = str(cp.context.get("goal", self._current_goal))
+
     # ── state machine helpers ──
 
     def _fire(self, event: GlobalEvent) -> None:
@@ -766,6 +860,11 @@ class AgentOrchestrator:
         if not hasattr(self, "_state_machine") or self._state_machine is None:
             return "INIT"
         return self._state_machine.state
+
+    def shutdown(self) -> None:
+        """Stop the debug server (if running). Idempotent."""
+        if self._debug_server is not None:
+            self._debug_server.stop()
 
 
 # ── internal helpers ──

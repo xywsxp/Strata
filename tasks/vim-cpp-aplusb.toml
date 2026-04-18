@@ -1,0 +1,23 @@
+[task]
+id = "vim-cpp-aplusb-gui"
+goal = """在 Ubuntu 桌面上完全依靠 GUI 视觉与交互完成以下 C++ 开发任务。
+
+核心目标：在终端模拟器中，使用 vim 编写一个计算 A+B 的 C++ 程序，成功编译并运行。
+
+严格约束与验收标准：
+1. 逻辑要求：程序必须从标准输入（stdin）读取两个整数，并将计算求和的结果输出到标准输出（stdout）。
+2. 路径要求：源代码必须保存为 /tmp/main.cpp，编译出的二进制可执行文件必须位于 /tmp/main。
+3. 动作空间限制：全程必须使用系统提供的 GUI 操作原语（如 locate_and_click, type_text, press_key）来操作终端窗口。严禁使用任何绕过 GUI 的系统级后门 API（例如绝对禁止使用 execute_command 或 write_file 直接写入系统）。
+4. 闭环验证：你需要自行在终端中调用 g++ 进行编译。若屏幕视觉反馈显示编译 error，Agent 需具备自愈能力——自主解析错误、重新打开 vim 定位修改、并再次编译，直到 /tmp/main 成功生成且能在终端中交互测试通过。
+"""
+tags = ["gui", "cpp", "vim", "autonomous-planning"]
+timeout_s = 300
+
+[setup]
+target = "osworld"
+commands = ["rm -f /tmp/main.cpp /tmp/main"]
+
+[verify]
+target = "osworld"
+command = "if [ -x /tmp/main ]; then echo '13 29' | /tmp/main; else exit 1; fi"
+expected_stdout_regex = "42"

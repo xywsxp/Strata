@@ -11,6 +11,7 @@ import importlib.resources
 import json
 import threading
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import icontract
@@ -23,6 +24,8 @@ from strata.debug.rollback import RollbackEngine
 
 if TYPE_CHECKING:
     from strata.env.protocols import IGUIAdapter
+    from strata.harness.persistence import Checkpoint
+    from strata.llm.provider import ChatMessage
 
 import aiohttp.web
 
@@ -57,7 +60,6 @@ class DebugServer:
     # CONVENTION: daemon 线程 + 独立 event loop；stop() 幂等。
     """
 
-    @icontract.require(lambda self: True)
     def __init__(
         self,
         controller: DebugController,
@@ -66,6 +68,10 @@ class DebugServer:
         graph_fn: Callable[[], TaskGraph | None] | None = None,
         task_states_fn: Callable[[], Mapping[str, str]] | None = None,
         rollback_engine: RollbackEngine | None = None,
+        task_dir: str | None = None,
+        goal_fn: Callable[[str], None] | None = None,
+        cancel_fn: Callable[[], None] | None = None,
+        restore_fn: Callable[[Checkpoint], None] | None = None,
     ) -> None:
         self._controller = controller
         self._config = config
@@ -73,10 +79,16 @@ class DebugServer:
         self._graph_fn = graph_fn
         self._task_states_fn = task_states_fn
         self._rollback = rollback_engine
+        self._task_dir = task_dir
+        self._goal_fn = goal_fn
+        self._cancel_fn = cancel_fn
+        self._restore_fn = restore_fn
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._runner: aiohttp.web.AppRunner | None = None
         self._running = False
+        self._active_goal: str | None = None
+        self._goal_lock = threading.Lock()
 
     @property
     def is_running(self) -> bool:
@@ -122,6 +134,8 @@ class DebugServer:
             asyncio.run_coroutine_threadsafe(self._shutdown(), self._loop)
         if self._thread is not None:
             self._thread.join(timeout=5.0)
+            if self._thread.is_alive():
+                return
         self._running = False
 
     async def _start_app(self, ready: threading.Event) -> None:
@@ -138,10 +152,17 @@ class DebugServer:
         app.router.add_get("/api/prompt/pending", self._handle_prompt_pending)
         app.router.add_post("/api/prompt/approve", self._handle_prompt_approve)
         app.router.add_post("/api/prompt/skip", self._handle_prompt_skip)
+        app.router.add_post("/api/prompt/enable", self._handle_prompt_enable)
         app.router.add_post("/api/rollback/task", self._handle_rollback_task)
         app.router.add_post("/api/rollback/checkpoint", self._handle_rollback_checkpoint)
         app.router.add_post("/api/rollback/graph", self._handle_rollback_graph)
         app.router.add_get("/api/rollback/versions", self._handle_rollback_versions)
+        app.router.add_get("/api/tasks", self._handle_tasks)
+        app.router.add_post("/api/goal", self._handle_goal)
+        app.router.add_get("/api/goal/status", self._handle_goal_status)
+        app.router.add_post("/api/goal/cancel", self._handle_goal_cancel)
+        app.router.add_get("/api/llm/history", self._handle_llm_history)
+        app.router.add_get("/api/llm/history/{seq}", self._handle_llm_record)
         self._runner = aiohttp.web.AppRunner(app)
         await self._runner.setup()
         site = aiohttp.web.TCPSite(self._runner, "0.0.0.0", self._config.port)
@@ -205,6 +226,8 @@ class DebugServer:
                         "global_state": ev.global_state,
                         "task_states": dict(ev.task_states),
                         "timestamp": ev.timestamp,
+                        "task_id": ev.task_id,
+                        "detail": ev.detail,
                     }
                     await ws.send_json(payload)
                 await asyncio.sleep(0.1)
@@ -213,8 +236,18 @@ class DebugServer:
         return ws
 
     async def _handle_step(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
-        self._controller.enable_step_mode()
-        return aiohttp.web.json_response({"ok": True, "step_mode": True})
+        enabled = True
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                enabled = bool(body.get("enabled", True))
+        except Exception:
+            pass
+        if enabled:
+            self._controller.enable_step_mode()
+        else:
+            self._controller.disable_step_mode()
+        return aiohttp.web.json_response({"ok": True, "step_mode": enabled})
 
     async def _handle_continue(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
         self._controller.continue_execution()
@@ -247,12 +280,42 @@ class DebugServer:
         return aiohttp.web.json_response({"pending": pending})
 
     async def _handle_prompt_approve(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
-        self._controller.approve_prompt()
+        from typing import Literal, cast
+
+        from strata.llm.provider import ChatMessage
+
+        _VALID_ROLES = frozenset({"system", "user", "assistant"})
+
+        edited: list[ChatMessage] | None = None
+        try:
+            body = await request.json()
+            if isinstance(body, dict) and "messages" in body:
+                raw_msgs = body["messages"]
+                if isinstance(raw_msgs, list):
+                    edited = []
+                    for m in raw_msgs:
+                        if not isinstance(m, dict):
+                            continue
+                        role_raw = str(m.get("role", "user"))
+                        role = role_raw if role_raw in _VALID_ROLES else "user"
+                        edited.append(
+                            ChatMessage(
+                                role=cast(Literal["system", "user", "assistant"], role),
+                                content=str(m.get("content", "")),
+                            )
+                        )
+        except Exception:
+            pass
+        self._controller.approve_prompt(edited_messages=edited)
         return aiohttp.web.json_response({"ok": True})
 
     async def _handle_prompt_skip(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
         self._controller.skip_interception()
         return aiohttp.web.json_response({"ok": True, "intercept_prompts": False})
+
+    async def _handle_prompt_enable(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        self._controller.enable_interception()
+        return aiohttp.web.json_response({"ok": True, "intercept_prompts": True})
 
     # ── rollback handlers ──
 
@@ -292,6 +355,8 @@ class DebugServer:
             cp = self._rollback.rollback_to_checkpoint(version)
         except DebugRollbackError as exc:
             return aiohttp.web.json_response({"error": str(exc)}, status=400)
+        if self._restore_fn is not None:
+            self._restore_fn(cp)
         return aiohttp.web.json_response(
             {
                 "ok": True,
@@ -319,7 +384,128 @@ class DebugServer:
             return aiohttp.web.json_response({"error": "rollback not available"}, status=503)
         return aiohttp.web.json_response(
             {
-                "versions": self._rollback._persistence.list_versions(),
+                "versions": self._rollback.list_checkpoint_versions(),
                 "undo_depth": self._rollback.undo_depth,
+            }
+        )
+
+    # ── task file browser ──
+
+    async def _handle_tasks(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        """Scan task_dir for *.toml files and return parsed metadata."""
+        tasks: list[dict[str, object]] = []
+        scan_dir = Path(self._task_dir) if self._task_dir else None
+        if scan_dir and scan_dir.is_dir():
+            import tomllib
+
+            for f in sorted(scan_dir.glob("*.toml")):
+                try:
+                    data = tomllib.loads(f.read_text(encoding="utf-8"))
+                    task_sect = data.get("task", data)
+                    tasks.append(
+                        {
+                            "file": f.name,
+                            "id": str(task_sect.get("id", f.stem)),
+                            "goal": str(task_sect.get("goal", "")),
+                            "tags": list(task_sect.get("tags", [])),
+                            "timeout_s": task_sect.get("timeout_s", 300),
+                        }
+                    )
+                except Exception:
+                    tasks.append({"file": f.name, "id": f.stem, "goal": "", "tags": []})
+        return aiohttp.web.json_response({"tasks": tasks, "task_dir": str(scan_dir or "")})
+
+    # ── goal submission ──
+
+    async def _handle_goal(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        if self._goal_fn is None:
+            return aiohttp.web.json_response({"error": "goal_fn not configured"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return aiohttp.web.json_response({"error": "invalid JSON"}, status=400)
+        goal = str(body.get("goal", "")).strip()
+        if not goal:
+            return aiohttp.web.json_response({"error": "goal must be non-empty"}, status=400)
+        with self._goal_lock:
+            if self._active_goal is not None:
+                return aiohttp.web.json_response(
+                    {"error": "a goal is already running", "active": self._active_goal},
+                    status=409,
+                )
+            self._active_goal = goal
+
+        loop = asyncio.get_running_loop()
+
+        def _run_and_clear() -> None:
+            try:
+                self._goal_fn(goal)  # type: ignore[misc]
+            finally:
+                with self._goal_lock:
+                    self._active_goal = None
+
+        # Fire-and-forget: return 202 immediately so the panel stays responsive.
+        # Goal progress is reported via WS events + GET /api/goal/status polling.
+        loop.run_in_executor(None, _run_and_clear)
+        return aiohttp.web.json_response({"ok": True, "goal": goal}, status=202)
+
+    async def _handle_goal_status(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        with self._goal_lock:
+            active = self._active_goal
+        return aiohttp.web.json_response({"active_goal": active, "busy": active is not None})
+
+    async def _handle_goal_cancel(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        """Request cooperative cancellation of the running goal.
+
+        The background thread will exit at the next task boundary. The
+        ``_active_goal`` is cleared immediately so the panel can accept a new
+        goal once the old one finishes.
+        """
+        with self._goal_lock:
+            was_active = self._active_goal is not None
+            self._active_goal = None
+        if was_active and self._cancel_fn is not None:
+            self._cancel_fn()
+        self._controller.continue_execution()
+        return aiohttp.web.json_response({"ok": True})
+
+    # ── LLM transcript history ──
+
+    async def _handle_llm_history(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        records = self._controller.get_llm_history()
+        items = [
+            {
+                "seq": r.seq,
+                "role": r.role,
+                "started_at": r.started_at,
+                "duration_ms": r.duration_ms,
+                "status": r.status,
+                "msg_count": len(r.request_messages),
+                "response_len": len(r.response_text),
+                "error_type": r.error_type,
+            }
+            for r in records
+        ]
+        return aiohttp.web.json_response({"records": items})
+
+    async def _handle_llm_record(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        try:
+            seq = int(request.match_info["seq"])
+        except (KeyError, ValueError):
+            return aiohttp.web.json_response({"error": "invalid seq"}, status=400)
+        rec = self._controller.get_llm_record(seq)
+        if rec is None:
+            return aiohttp.web.json_response({"error": "record not found"}, status=404)
+        return aiohttp.web.json_response(
+            {
+                "seq": rec.seq,
+                "role": rec.role,
+                "started_at": rec.started_at,
+                "duration_ms": rec.duration_ms,
+                "status": rec.status,
+                "request_messages": [dict(m) for m in rec.request_messages],
+                "response_text": rec.response_text,
+                "error_type": rec.error_type,
+                "error_msg": rec.error_msg,
             }
         )

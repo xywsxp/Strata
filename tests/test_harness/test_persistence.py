@@ -149,3 +149,20 @@ class TestMultiVersionCheckpoints:
         mgr.save_checkpoint(self._make_cp("only"))
         assert mgr.list_versions() == []
         assert mgr.load_checkpoint() is not None
+
+    def test_version_reloaded_from_disk_on_restart(self, tmp_path: Path) -> None:
+        """current_version is restored from disk when a new PersistenceManager is created."""
+        state_dir = str(tmp_path / "state")
+        mgr1 = PersistenceManager(state_dir, max_checkpoint_history=10)
+        mgr1.save_checkpoint(self._make_cp("cp1"))
+        mgr1.save_checkpoint(self._make_cp("cp2"))
+        mgr1.save_checkpoint(self._make_cp("cp3"))
+        assert mgr1.current_version == 3
+
+        # Simulate restart — create a new manager pointing at the same dir.
+        mgr2 = PersistenceManager(state_dir, max_checkpoint_history=10)
+        assert mgr2.current_version == 3, "version must be restored from disk after restart"
+
+    def test_version_starts_at_zero_when_no_files(self, tmp_path: Path) -> None:
+        mgr = PersistenceManager(str(tmp_path / "fresh"), max_checkpoint_history=10)
+        assert mgr.current_version == 0

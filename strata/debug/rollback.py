@@ -109,3 +109,7 @@ class RollbackEngine:
 
     def list_undo_stack(self) -> Sequence[UndoRecord]:
         return list(self._undo_stack)
+
+    def list_checkpoint_versions(self) -> list[int]:
+        """Delegate to PersistenceManager for available checkpoint versions."""
+        return self._persistence.list_versions()
