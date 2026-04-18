@@ -29,12 +29,23 @@ class SandboxGuard:
         )
 
     @icontract.require(lambda path: len(path.strip()) > 0, "path must be non-empty")
-    @icontract.ensure(lambda result: os.path.isabs(result), "result must be absolute")
+    @icontract.ensure(
+        lambda self, result, write: (
+            os.path.isabs(result)
+            and (
+                not self._enabled
+                or self._is_under(result, self._root)
+                or (not write and self._is_read_only(result))
+            )
+        ),
+        "result must be absolute and within sandbox boundary",
+    )
     def check_path(self, path: str, write: bool = False) -> str:
-        """Canonicalize *path* and verify it is within the sandbox.
+        """Single authorization checkpoint for all file I/O in the framework.
 
-        Returns the resolved absolute path. Raises SandboxViolationError if the
-        path escapes the sandbox or if a write is attempted on a read-only path.
+        Centralizes path canonicalization so callers never handle raw user paths
+        directly. The sandbox boundary logic lives here (rather than scattered
+        across adapters) to guarantee a single audit point.
         """
         if not self._enabled:
             return os.path.realpath(os.path.expanduser(path))

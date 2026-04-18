@@ -64,7 +64,9 @@ class VisionLocator:
         "returned coordinate must be within live screen bounds",
     )
     def locate(self, description: str, role: str | None = None) -> Coordinate:
-        """Single-shot locate: screenshot -> VLM -> coordinate."""
+        """One-shot VLM call — preferred when the target element is expected to
+        be already visible, avoiding the overhead of the scroll-search loop.
+        """
         screenshot = self._gui.capture_screen()
         response = self._call_vlm(screenshot, description, role)
         if response.action_type != "click" or response.coordinate is None:
@@ -96,7 +98,12 @@ class VisionLocator:
         role: str | None = None,
         timeout: float = 30.0,
     ) -> Coordinate:
-        """Locate with scroll search. Falls back to single locate if scroll disabled."""
+        """Iterative screenshot+VLM loop with scroll actions between attempts.
+
+        Trades higher latency (up to max_scroll_attempts x VLM RTT) for the
+        ability to find off-screen elements. Falls back to single-shot
+        :meth:`locate` when scroll search is disabled in config.
+        """
         if not self._config.enable_scroll_search:
             return self.locate(description, role)
 
