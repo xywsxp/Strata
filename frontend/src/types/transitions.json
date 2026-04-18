@@ -1,0 +1,49 @@
+{
+  "global": {
+    "COMPLETED": {},
+    "CONFIRMING": {
+      "user_abort": "FAILED",
+      "user_confirm": "SCHEDULING",
+      "user_revise": "PLANNING"
+    },
+    "EXECUTING": {
+      "task_done": "SCHEDULING",
+      "task_failed": "RECOVERING",
+      "user_abort": "FAILED"
+    },
+    "FAILED": {},
+    "INIT": {
+      "receive_goal": "PLANNING"
+    },
+    "PLANNING": {
+      "plan_ready": "CONFIRMING",
+      "unrecoverable": "FAILED"
+    },
+    "RECOVERING": {
+      "escalated": "WAITING_USER",
+      "recovered": "SCHEDULING",
+      "unrecoverable": "FAILED"
+    },
+    "SCHEDULING": {
+      "all_done": "COMPLETED",
+      "task_dispatched": "EXECUTING"
+    },
+    "WAITING_USER": {
+      "user_abort": "FAILED",
+      "user_decision": "SCHEDULING"
+    }
+  },
+  "task": {
+    "FAILED": {},
+    "PENDING": {
+      "skip": "SKIPPED",
+      "start": "RUNNING"
+    },
+    "RUNNING": {
+      "fail": "FAILED",
+      "succeed": "SUCCEEDED"
+    },
+    "SKIPPED": {},
+    "SUCCEEDED": {}
+  }
+}
