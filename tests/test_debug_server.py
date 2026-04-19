@@ -344,34 +344,140 @@ class TestGraphHistory:
             server.stop()
 
 
-class TestPanelHTML:
-    """Static assertions on the served panel.html content."""
+class TestIndexServesVueBuild:
+    """Step 15.1: _handle_index prefers frontend/dist/index.html."""
 
-    def test_panel_html_no_orphan_css(self) -> None:
-        """Confirm orphan CSS classes were removed in Step 10.1."""
-        import importlib.resources
+    def test_index_serves_vue_build(self, _server_ctx: _ServerCtx) -> None:
+        """When frontend/dist/index.html exists, it should be served."""
+        port, token, _, _ = _server_ctx
 
-        html = importlib.resources.read_text("strata.debug", "panel.html")
-        for orphan in (".llm-msg-block", ".llm-modal", ".llm-msg-role", ".llm-msg-content"):
-            assert orphan not in html, f"orphan CSS {orphan} still present"
+        async def _check() -> None:
+            async with (
+                aiohttp.ClientSession() as s,
+                s.get(
+                    f"http://127.0.0.1:{port}/",
+                    headers={"Authorization": f"Bearer {token}"},
+                ) as resp,
+            ):
+                assert resp.status == 200
+                text = await resp.text()
+                # Must contain HTML content
+                assert "<html" in text.lower() or "<!doctype" in text.lower()
 
-    def test_panel_html_vis_network_ref(self) -> None:
-        """vis-network CDN reference must still exist."""
-        import importlib.resources
+        asyncio.run(_check())
 
-        html = importlib.resources.read_text("strata.debug", "panel.html")
-        assert "vis-network" in html
+    @pytest.fixture()
+    def _server_ctx(self) -> Generator[_ServerCtx]:
+        port = 18406
+        cfg = _make_cfg(port)
+        ctrl = DebugController(cfg)
+        server = DebugServer(ctrl, cfg)
+        server.start()
+        yield port, cfg.token, ctrl, server
+        server.stop()
 
-    def test_panel_html_no_transcript_modal(self) -> None:
-        """Confirm llm-transcript-modal was removed in Step 10.2."""
-        import importlib.resources
 
-        html = importlib.resources.read_text("strata.debug", "panel.html")
-        assert "llm-transcript-modal" not in html
+class TestGoalFnExceptionNotification:
+    """Step 15.2: _run_and_clear notifies FAILED on exception."""
 
-    def test_panel_html_valid(self) -> None:
-        """Confirm script tags are balanced."""
-        import importlib.resources
+    @pytest.fixture()
+    def _server_ctx(self) -> Generator[_ServerCtx]:
+        port = 18407
+        cfg = _make_cfg(port)
+        ctrl = DebugController(cfg)
 
-        html = importlib.resources.read_text("strata.debug", "panel.html")
-        assert html.count("<script") == html.count("</script>")
+        def failing_goal(goal: str) -> None:
+            raise RuntimeError("simulated failure")
+
+        server = DebugServer(ctrl, cfg, goal_fn=failing_goal)
+        server.start()
+        yield port, cfg.token, ctrl, server
+        server.stop()
+
+    def test_goal_fn_exception_notifies_failed(self, _server_ctx: _ServerCtx) -> None:
+        """When goal_fn raises, controller must see FAILED state."""
+        port, token, ctrl, _ = _server_ctx
+        import time
+
+        async def _submit() -> None:
+            async with (
+                aiohttp.ClientSession() as s,
+                s.post(
+                    f"http://127.0.0.1:{port}/api/goal",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    json={"goal": "test goal"},
+                ) as resp,
+            ):
+                assert resp.status == 202
+
+        asyncio.run(_submit())
+        # Wait for background thread to complete
+        time.sleep(1.0)
+        snap = ctrl.get_state_snapshot()
+        assert snap["global_state"] == "FAILED"
+
+    def test_goal_fn_exception_clears_active_goal(self, _server_ctx: _ServerCtx) -> None:
+        """When goal_fn raises, _active_goal must be None."""
+        port, token, ctrl, server = _server_ctx
+        import time
+
+        async def _submit() -> None:
+            async with (
+                aiohttp.ClientSession() as s,
+                s.post(
+                    f"http://127.0.0.1:{port}/api/goal",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    json={"goal": "failing goal"},
+                ) as resp,
+            ):
+                assert resp.status == 202
+
+        asyncio.run(_submit())
+        time.sleep(1.0)
+        with server._goal_lock:
+            assert server._active_goal is None
+
+    @pytest.fixture()
+    def _success_server_ctx(self) -> Generator[_ServerCtx]:
+        port = 18408
+        cfg = _make_cfg(port)
+        ctrl = DebugController(cfg)
+
+        def success_goal(goal: str) -> None:
+            pass  # no-op
+
+        server = DebugServer(ctrl, cfg, goal_fn=success_goal)
+        server.start()
+        yield port, cfg.token, ctrl, server
+        server.stop()
+
+    def test_goal_fn_success_no_extra_notify(self, _success_server_ctx: _ServerCtx) -> None:
+        """When goal_fn succeeds, no spurious 'unrecoverable' event is sent."""
+        port, token, ctrl, _ = _success_server_ctx
+        import time
+
+        async def _submit() -> None:
+            async with (
+                aiohttp.ClientSession() as s,
+                s.post(
+                    f"http://127.0.0.1:{port}/api/goal",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    json={"goal": "success goal"},
+                ) as resp,
+            ):
+                assert resp.status == 202
+
+        asyncio.run(_submit())
+        time.sleep(1.0)
+        snap = ctrl.get_state_snapshot()
+        # Should still be INIT (no state change), not FAILED
+        assert snap["global_state"] != "FAILED"

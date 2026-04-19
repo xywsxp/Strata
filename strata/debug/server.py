@@ -7,7 +7,6 @@ Lazy-imported: ``debug.enabled = false`` never loads aiohttp.
 from __future__ import annotations
 
 import asyncio
-import importlib.resources
 import json
 import threading
 from collections.abc import Callable, Mapping, Sequence
@@ -187,13 +186,18 @@ class DebugServer:
     # ── handlers ──
 
     async def _handle_index(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
-        try:
-            ref = importlib.resources.files("strata.debug").joinpath("panel.html")
-            html = ref.read_text(encoding="utf-8")
-        except (FileNotFoundError, TypeError):
-            html = (
-                "<html><body><h1>Strata Debug Panel</h1><p>panel.html not found</p></body></html>"
-            )
+        """Serve the debug panel from frontend/dist/index.html."""
+        vue_build = (
+            Path(__file__).resolve().parent.parent.parent / "frontend" / "dist" / "index.html"
+        )
+        if vue_build.is_file():
+            html = vue_build.read_text(encoding="utf-8")
+            return aiohttp.web.Response(text=html, content_type="text/html")
+        html = (
+            "<html><body><h1>Strata Debug Panel</h1>"
+            "<p>Build frontend first: cd frontend &amp;&amp; npm run build</p>"
+            "</body></html>"
+        )
         return aiohttp.web.Response(text=html, content_type="text/html")
 
     async def _handle_state(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
@@ -455,6 +459,9 @@ class DebugServer:
         def _run_and_clear() -> None:
             try:
                 self._goal_fn(goal)  # type: ignore[misc]
+            except Exception:
+                # Notify controller so WS clients see FAILED state
+                self._controller.notify("unrecoverable", "FAILED", {})
             finally:
                 with self._goal_lock:
                     self._active_goal = None
